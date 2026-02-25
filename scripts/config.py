@@ -1,6 +1,8 @@
 # OSCE Grader Configuration File
 
-# OpenAI API Key (loaded from external file for security)
+# OpenAI API Key
+# Loaded from the API_KEY_FILE path below, or from the OPENAI_API_KEY environment variable.
+# The environment variable takes precedence if set.
 API_KEY_FILE = "api_key.txt"
 
 # Model Selection
@@ -14,11 +16,25 @@ The rubric is broken into individual sections. To ensure accuracy, please score 
 For each section, provide a detailed explanation of your reasoning before giving a final score.
 At the end of your evaluation, place the final score as an integer on a new line with no markup."""
 
-# Default Temperature & Top-P (Not emphasized but configurable)
+# Default Temperature & Top-P (configurable via CLI flags --temperature and --top_p)
 TEMPERATURE = 0.5
 TOP_P = 1.0
 
+# Sections to grade (column names expected in the student notes Excel file).
+# These must match the column headers in your student-notes Excel file.
+#
+# NOTE: Some rubrics include an "org" (organization) section that is scored
+# by human graders only and does not appear as a content column in the student
+# notes.  If your workflow does include an "org" column in the student notes
+# that should be AI-graded, add 'org' to this list.
+SECTIONS = ['hpi', 'pex', 'sum', 'ddx', 'support', 'plan']
+
+# API retry settings
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds (doubles on each retry)
+
 # File Paths (Users can set defaults here)
-DEFAULT_RUBRIC_PATH = "examples/sample_rubric.xlsx"
-DEFAULT_NOTES_PATH = "examples/sample_notes.xlsx"
+DEFAULT_RUBRIC_PATH = "examples/sample_standard_rubric.xlsx"
+DEFAULT_ANSWER_KEY_PATH = "examples/sample_flankpain_key.xlsx"
+DEFAULT_NOTES_PATH = "examples/sample_student_notes.xlsx"
 DEFAULT_OUTPUT_PATH = "results.xlsx"

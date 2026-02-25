@@ -1,6 +1,5 @@
-openai
-pandas
-numpy
-argparse
-python-docx
-pdfminer.six
+openai>=1.0.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+python-docx>=0.8.11
+pdfminer.six>=20221105
