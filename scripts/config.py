@@ -14,10 +14,14 @@ My students recently completed an OSCE post-encounter note based on a standardiz
 I have provided a structured scoring rubric with expected responses.
 The rubric is broken into individual sections. To ensure accuracy, please score each section separately.
 For each section, provide a detailed explanation of your reasoning before giving a final score.
-At the end of your evaluation, place the final score as an integer on a new line with no markup."""
+
+You MUST respond with valid JSON in this exact format:
+{"explanation": "Your detailed reasoning here...", "score": 8}
+
+The "score" field must be an integer. The "explanation" field should contain your full evaluation."""
 
 # Default Temperature & Top-P (configurable via CLI flags --temperature and --top_p)
-TEMPERATURE = 0.5
+TEMPERATURE = 0.1
 TOP_P = 1.0
 
 # Sections to grade (column names expected in the student notes Excel file).

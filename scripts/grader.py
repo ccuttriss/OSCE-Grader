@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import logging
 import os
 import re
@@ -113,6 +114,7 @@ def read_rubric_and_key(
     if rubric_df.empty:
         logger.error("Rubric file '%s' contains no data rows.", rubric_file)
         raise SystemExit(1)
+    rubric_df.columns = rubric_df.columns.str.lower().str.strip()
     rubric: dict[str, str] = rubric_df.iloc[0].to_dict()
 
     answer_key_df = _read_excel_safe(answer_key_file, "answer key")
@@ -121,6 +123,7 @@ def read_rubric_and_key(
             "Answer-key file '%s' contains no data rows.", answer_key_file
         )
         raise SystemExit(1)
+    answer_key_df.columns = answer_key_df.columns.str.lower().str.strip()
     answer_key: dict[str, str] = answer_key_df.iloc[0].to_dict()
 
     return rubric, answer_key
@@ -175,6 +178,7 @@ def call_openai(
                 messages=messages,
                 temperature=temperature,
                 top_p=top_p,
+                response_format={"type": "json_object"},
             )
             return response.choices[0].message.content.strip()
         except Exception as exc:
@@ -268,10 +272,24 @@ def grade_section_with_key(
         },
     ]
 
-    score_text = call_openai(client, messages, temperature, top_p)
-    log_interaction(log_file, messages, score_text)
+    raw_response = call_openai(client, messages, temperature, top_p)
+    log_interaction(log_file, messages, raw_response)
 
-    numeric_score = extract_score(score_text)
+    # Try to parse structured JSON response first
+    explanation = raw_response
+    numeric_score = None
+    try:
+        parsed = json.loads(raw_response)
+        numeric_score = int(parsed["score"])
+        explanation = parsed.get("explanation", raw_response)
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        # Fall back to regex extraction for non-JSON responses
+        logger.debug(
+            "JSON parsing failed for section '%s', falling back to regex.",
+            section_name,
+        )
+        numeric_score = extract_score(raw_response)
+
     if numeric_score is None:
         logger.warning(
             "Could not extract a numeric score for section '%s'. "
@@ -279,7 +297,7 @@ def grade_section_with_key(
             section_name,
         )
 
-    return score_text, numeric_score
+    return explanation, numeric_score
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +331,28 @@ def validate_output_directory(output_path: str) -> None:
         raise SystemExit(1)
 
 
+def _print_summary_stats(df: pd.DataFrame, sections: list[str]) -> None:
+    """Print per-section grading statistics after grading completes."""
+    logger.info("=== Grading Summary ===")
+    for section in sections:
+        score_col = f"{section}_gpt_score"
+        if score_col in df.columns:
+            scores = pd.to_numeric(df[score_col], errors="coerce").dropna()
+            if len(scores) > 0:
+                logger.info(
+                    "  %s: mean=%.1f, median=%.1f, min=%d, max=%d, std=%.1f (n=%d)",
+                    section.upper(),
+                    scores.mean(),
+                    scores.median(),
+                    int(scores.min()),
+                    int(scores.max()),
+                    scores.std(),
+                    len(scores),
+                )
+            else:
+                logger.info("  %s: no scores recorded", section.upper())
+
+
 def _save_results(df: pd.DataFrame, output_file: str) -> None:
     """Write the DataFrame to an Excel file with error handling."""
     try:
@@ -331,6 +371,17 @@ def _save_results(df: pd.DataFrame, output_file: str) -> None:
 # Main processing loop
 # ---------------------------------------------------------------------------
 
+def _row_already_graded(row: pd.Series, sections: list[str]) -> bool:
+    """Return True if every section in the row already has a score."""
+    for section in sections:
+        score_col = f"{section}_gpt_score"
+        if score_col not in row.index or pd.isna(row.get(score_col)):
+            # Only count as ungraded if the section actually has content
+            if section in row.index and pd.notna(row.get(section)):
+                return False
+    return True
+
+
 def process_excel_file_with_key(
     client: OpenAI,
     excel_file: str,
@@ -339,6 +390,7 @@ def process_excel_file_with_key(
     output_file: str,
     temperature: float,
     top_p: float,
+    dry_run: bool = False,
 ) -> None:
     """Grade every student row in the Excel file and write results."""
     df = _read_excel_safe(excel_file, "student notes")
@@ -365,7 +417,57 @@ def process_excel_file_with_key(
         )
         return
 
+    # --- Resume: load existing results if the output file exists ---
+    resumed = False
+    if os.path.isfile(output_file):
+        try:
+            existing_df = pd.read_excel(output_file)
+            # Verify the existing file has the same number of rows
+            if len(existing_df) == total_rows:
+                # Merge existing grading columns into df
+                for col in existing_df.columns:
+                    if col.endswith("_gpt_score") or col.endswith("_gpt_explanation"):
+                        df[col] = existing_df[col]
+                resumed = True
+                logger.info(
+                    "Found existing output file '%s'. Resuming — will skip "
+                    "already-graded rows.",
+                    output_file,
+                )
+        except Exception:
+            logger.info(
+                "Could not read existing output file '%s'. Starting fresh.",
+                output_file,
+            )
+
+    # --- Dry run: count API calls and estimate cost ---
+    if dry_run:
+        api_calls = 0
+        for index, row in df.iterrows():
+            if resumed and _row_already_graded(row, sections):
+                continue
+            for section in sections:
+                if pd.notna(row.get(section)):
+                    api_calls += 1
+        # Rough estimate: ~1K tokens per call for gpt-4o-mini
+        est_cost = api_calls * 0.001  # ~$0.001 per call for gpt-4o-mini
+        logger.info("=== Dry Run Summary ===")
+        logger.info("Total student rows: %d", total_rows)
+        logger.info("API calls needed: %d", api_calls)
+        logger.info("Estimated cost: $%.2f (based on ~1K tokens/call with %s)",
+                     est_cost, config.MODEL)
+        logger.info("To run for real, remove the --dry-run flag.")
+        return
+
+    skipped = 0
+    graded = 0
+
     for index, row in df.iterrows():
+        # Skip rows that are already fully graded (resume support)
+        if resumed and _row_already_graded(row, sections):
+            skipped += 1
+            continue
+
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
             "%s - Processing row %d/%d...", current_time, index + 1, total_rows
@@ -387,11 +489,19 @@ def process_excel_file_with_key(
                 df.at[index, f"{section}_gpt_explanation"] = explanation
                 df.at[index, f"{section}_gpt_score"] = numeric_score
 
+        graded += 1
         # --- Intermediate save after each student row ---
         _save_results(df, output_file)
 
+    if resumed and skipped > 0:
+        logger.info("Skipped %d already-graded rows.", skipped)
+
+    # --- Summary statistics ---
+    _print_summary_stats(df, sections)
+
     logger.info(
-        "Grading completed. Results saved to %s. Log saved to %s.",
+        "Grading completed. %d rows graded. Results saved to %s. Log saved to %s.",
+        graded,
         output_file,
         log_file,
     )
@@ -442,6 +552,12 @@ def main() -> None:
         default=config.TOP_P,
         help="Top-p (nucleus sampling) setting, 0.0-1.0 (default: %(default)s)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Count API calls and estimate cost without actually grading.",
+    )
     args = parser.parse_args()
 
     # --- Configure console logging ---
@@ -481,8 +597,10 @@ def main() -> None:
         )
         raise SystemExit(1)
 
-    # --- Initialise the OpenAI client ---
-    client = OpenAI(api_key=get_api_key())
+    # --- Initialise the OpenAI client (not needed for dry runs) ---
+    client = None
+    if not args.dry_run:
+        client = OpenAI(api_key=get_api_key())
 
     rubric_content, answer_key_content = read_rubric_and_key(
         args.rubric, args.answer_key
@@ -495,6 +613,7 @@ def main() -> None:
         args.output,
         args.temperature,
         args.top_p,
+        dry_run=args.dry_run,
     )
 
 
