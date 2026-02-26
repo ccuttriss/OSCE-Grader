@@ -1,7 +1,16 @@
 <div class="alert alert-success">
-  Conversion complete! The output contains raw text in a single column.
-  You will need to restructure it into section columns (hpi, pex, sum, ddx, support, plan) before grading.
+  Conversion complete! The rubric has been parsed into section columns.
 </div>
+
+{% if found %}
+<p><strong>Sections found:</strong> {{ found|join(', ') }}</p>
+{% endif %}
+{% if empty %}
+<p class="text-muted"><strong>Not found in document:</strong> {{ empty|join(', ') }}</p>
+{% endif %}
+
 <div class="action-bar">
   <a href="/download/convert/{{ output_name }}" role="button">Download {{ output_name }}</a>
 </div>
+
+<p><small>Review the downloaded file and adjust any sections the model may have misinterpreted before using it for grading.</small></p>

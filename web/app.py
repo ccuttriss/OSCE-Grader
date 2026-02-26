@@ -18,7 +18,12 @@ from werkzeug.utils import secure_filename
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
-from grading_worker import compute_summary_stats, run_dry_run, run_grading
+from grading_worker import (
+    compute_summary_stats,
+    convert_rubric_with_llm,
+    run_dry_run,
+    run_grading,
+)
 from jobs import job_manager
 
 import config as grader_config
@@ -246,7 +251,7 @@ def api_job_status(job_id):
 
 @app.route("/api/convert", methods=["POST"])
 def api_convert():
-    """Convert a PDF/DOCX rubric to Excel."""
+    """Convert a PDF/DOCX rubric to structured Excel using the LLM."""
     if "rubric_file" not in request.files or request.files["rubric_file"].filename == "":
         return _alert("critical", "Please upload a rubric file.")
 
@@ -262,18 +267,40 @@ def api_convert():
     input_path = os.path.join(tmp_dir, safe_name)
     upload.save(input_path)
 
-    output_name = os.path.splitext(safe_name)[0] + ".xlsx"
-    output_path = os.path.join(tmp_dir, output_name)
-
+    # Step 1: Extract raw text from the document
     try:
-        from convert_rubric import convert_rubric
-        convert_rubric(input_path, output_path)
+        from convert_rubric import convert_pdf_to_text, convert_docx_to_text
+        if ext == ".pdf":
+            raw_text = convert_pdf_to_text(input_path)
+        else:
+            raw_text = convert_docx_to_text(input_path)
     except SystemExit:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        return _alert("critical", "Conversion failed. Check the file format.")
+        return _alert("critical", "Failed to extract text from the file.")
     except Exception as e:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        return _alert("critical", f"Conversion failed: {e}")
+        return _alert("critical", f"Text extraction failed: {e}")
+
+    if not raw_text.strip():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return _alert("critical", "No text could be extracted from the file.")
+
+    # Step 2: Use the LLM to parse into sections
+    try:
+        sections = convert_rubric_with_llm(raw_text)
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return _alert("critical", f"LLM conversion failed: {e}")
+
+    # Step 3: Build the structured Excel file
+    output_name = os.path.splitext(safe_name)[0] + ".xlsx"
+    output_path = os.path.join(tmp_dir, output_name)
+    try:
+        df = pd.DataFrame([sections])
+        df.to_excel(output_path, index=False)
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return _alert("critical", f"Failed to create Excel file: {e}")
 
     # Store the path so the download route can find it
     app.config.setdefault("CONVERT_FILES", {})[output_name] = {
@@ -281,7 +308,14 @@ def api_convert():
         "tmp_dir": tmp_dir,
     }
 
-    return render_template("_convert_result.html", output_name=output_name)
+    # Build a preview of what was extracted
+    found = [k.upper() for k, v in sections.items() if v.strip()]
+    empty = [k.upper() for k, v in sections.items() if not v.strip()]
+
+    return render_template("_convert_result.html",
+                           output_name=output_name,
+                           found=found,
+                           empty=empty)
 
 
 # -----------------------------------------------------------------------

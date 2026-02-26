@@ -26,7 +26,69 @@ from grader import (
 )
 from providers import create_caller
 
+import json
+
 logger = logging.getLogger("osce_grader.web")
+
+# ---------------------------------------------------------------------------
+# Rubric conversion (LLM-powered)
+# ---------------------------------------------------------------------------
+
+CONVERT_PROMPT = """\
+You are a medical education assistant. I will give you the raw text extracted \
+from a rubric document used to grade OSCE post-encounter notes.
+
+Your job is to identify the scoring criteria for each of these standard sections:
+
+- **hpi** — History of Present Illness
+- **pex** — Physical Examination
+- **sum** — Summary Statement
+- **ddx** — Differential Diagnosis
+- **support** — Supporting Data / Evidence for the differential
+- **plan** — Diagnostic Workup / Management Plan
+
+For each section, extract the FULL scoring rubric text (e.g. "4) Almost all key \
+information is present... 3) Most key findings... 2) Many omitted... 1) ...").
+
+If the document also contains an **org** (Organization) section, include it too.
+
+If a section is not found in the document, set its value to an empty string.
+
+Respond with ONLY valid JSON in this exact format (no markdown, no extra text):
+{"hpi": "full rubric text for hpi...", "pex": "...", "sum": "...", "ddx": "...", "support": "...", "plan": "...", "org": "..."}
+"""
+
+
+def convert_rubric_with_llm(raw_text: str) -> dict[str, str]:
+    """Use the LLM to parse raw rubric text into section columns.
+
+    Returns a dict mapping section names to their rubric text.
+    """
+    caller = create_caller("openai")
+
+    messages = [
+        {"role": "system", "content": CONVERT_PROMPT},
+        {"role": "user", "content": raw_text},
+    ]
+
+    from grader import call_llm
+    response = call_llm(caller, messages, temperature=0.0, top_p=1.0)
+
+    # Strip markdown fences if the model wraps the JSON
+    cleaned = response.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+
+    parsed = json.loads(cleaned)
+
+    # Ensure all expected keys exist
+    for key in config.SECTIONS:
+        parsed.setdefault(key, "")
+
+    return parsed
 
 
 def compute_summary_stats(df: pd.DataFrame, sections: list[str]) -> list[dict]:

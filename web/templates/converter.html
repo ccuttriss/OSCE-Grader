@@ -2,7 +2,7 @@
 {% block title %}Convert Rubric — OSCE Grader{% endblock %}
 {% block content %}
 <h2>Convert Rubric</h2>
-<p>Upload a rubric in PDF or DOCX format and download it as an Excel file. The output will need manual restructuring before use with the grader.</p>
+<p>Upload a rubric in PDF or DOCX format. The AI will read it and organize the scoring criteria into the correct section columns (HPI, PEX, SUM, DDX, Support, Plan) ready for grading.</p>
 
 <form hx-post="/api/convert" hx-target="#result-area" hx-swap="innerHTML" hx-encoding="multipart/form-data">
   <div class="grid">
