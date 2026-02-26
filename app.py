@@ -60,9 +60,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# TEST: Auto-deploy verification — remove after confirming
-st.toast("Hello! Auto-deploy is working!")
-
 # ---------------------------------------------------------------------------
 # Model benchmark data
 # ---------------------------------------------------------------------------
