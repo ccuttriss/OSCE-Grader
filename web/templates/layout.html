@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}OSCE Grader{% endblock %}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+</head>
+<body>
+  <nav class="top-nav">
+    <a href="/" class="brand">OSCE Grader</a>
+    <a href="/" class="{{ 'active' if active == 'grade' else '' }}">Grade Notes</a>
+    <a href="/converter" class="{{ 'active' if active == 'converter' else '' }}">Convert Rubric</a>
+  </nav>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="container">
+    <small class="text-muted">OSCE Grader &mdash; AI-powered medical student grading</small>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,55 @@
+<div class="alert alert-success">
+  Grading complete! {{ graded }} student{{ 's' if graded != 1 else '' }} graded.
+</div>
+
+{% if stats %}
+<h3>Summary Statistics</h3>
+<div class="metric-grid">
+  {% for s in stats %}
+  <div class="metric-card">
+    <div class="label">{{ s.section }}</div>
+    <div class="value">{{ s.mean }}</div>
+    <div class="detail">
+      Median: {{ s.median }} &middot; Min: {{ s.min }} &middot; Max: {{ s.max }}<br>
+      Std: {{ s.std }} &middot; n={{ s.count }}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<h3>Downloads</h3>
+<div class="action-bar">
+  <a href="/download/{{ job_id }}/results" role="button">Download Results (.xlsx)</a>
+  <a href="/download/{{ job_id }}/log" role="button" class="outline">Download Log (.log)</a>
+</div>
+
+{% if scores %}
+<h3>Per-Student Scores</h3>
+<div class="overflow-auto">
+<table class="data-table">
+  <thead>
+    <tr>
+      <th>#</th>
+      {% for section in sections %}
+      <th class="text-center">{{ section|upper }}</th>
+      {% endfor %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in scores %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      {% for section in sections %}
+      <td class="text-center">{{ row.get(section + '_gpt_score', '—') }}</td>
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+<div style="margin-top: 1.5rem;">
+  <a href="/" role="button" class="outline">Grade More Notes</a>
+</div>

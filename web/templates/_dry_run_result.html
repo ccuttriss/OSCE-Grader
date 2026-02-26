@@ -1,0 +1,26 @@
+<div class="alert alert-info">
+  <strong>Dry Run Complete</strong> — no API calls were made.
+</div>
+
+<div class="metric-grid">
+  <div class="metric-card">
+    <div class="label">Students</div>
+    <div class="value">{{ total_rows }}</div>
+  </div>
+  <div class="metric-card">
+    <div class="label">API Calls Needed</div>
+    <div class="value">{{ api_calls }}</div>
+  </div>
+  <div class="metric-card">
+    <div class="label">Estimated Cost</div>
+    <div class="value">{{ est_cost }}</div>
+    <div class="detail">Based on ~1K tokens/call with {{ model }}</div>
+  </div>
+  <div class="metric-card">
+    <div class="label">Sections</div>
+    <div class="value">{{ sections|length }}</div>
+    <div class="detail">{{ sections|join(', ')|upper }}</div>
+  </div>
+</div>
+
+<p>To run for real, click <strong>Grade</strong> instead of Dry Run.</p>
