@@ -1,0 +1,144 @@
+/* OSCE Grader — Custom overrides for Pico CSS */
+
+:root {
+  --nav-bg: #1a1a2e;
+  --nav-text: #e0e0e0;
+  --card-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  --status-healthy: #2ecc71;
+  --status-warning: #f39c12;
+  --status-critical: #e74c3c;
+}
+
+/* Global button fix — prevent Pico CSS full-width form buttons */
+button,
+button[type="submit"],
+input[type="submit"] {
+  width: auto !important;
+  display: inline-block;
+}
+
+/* Navigation */
+nav.top-nav {
+  background: var(--nav-bg);
+  padding: 0.5rem 1rem;
+  margin-bottom: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+nav.top-nav a {
+  color: var(--nav-text);
+  text-decoration: none;
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+nav.top-nav a:hover { background: rgba(255,255,255,0.1); }
+nav.top-nav a.active { background: rgba(255,255,255,0.2); font-weight: 600; }
+nav.top-nav .brand { font-weight: 700; font-size: 1.1rem; margin-right: 1rem; color: #fff; }
+
+/* Metric cards grid */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+.metric-card {
+  background: var(--pico-card-background-color, #fff);
+  border: 1px solid var(--pico-muted-border-color, #ddd);
+  border-radius: 8px;
+  padding: 1rem;
+  box-shadow: var(--card-shadow);
+  text-align: center;
+}
+.metric-card .label { font-size: 0.8rem; color: var(--pico-muted-color, #666); text-transform: uppercase; letter-spacing: 0.05em; }
+.metric-card .value { font-size: 1.8rem; font-weight: 700; margin: 0.25rem 0; }
+.metric-card .detail { font-size: 0.8rem; color: var(--pico-muted-color, #666); }
+
+/* Section cards */
+.section-card {
+  background: var(--pico-card-background-color, #fff);
+  border: 1px solid var(--pico-muted-border-color, #ddd);
+  border-radius: 8px;
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+  box-shadow: var(--card-shadow);
+}
+.section-card h3 { margin-top: 0; }
+
+/* Action bar */
+.action-bar {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
+}
+.action-bar button, .action-bar .btn, .action-bar a[role="button"] {
+  font-size: 0.85rem;
+  padding: 0.4rem 0.9rem;
+}
+
+/* Alerts */
+.alert { padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 0.75rem; font-size: 0.9rem; }
+.alert-warning { background: #fff3cd; border: 1px solid #ffc107; color: #856404; }
+.alert-critical { background: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
+.alert-info { background: #d1ecf1; border: 1px solid #bee5eb; color: #0c5460; }
+.alert-success { background: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
+
+/* Table tweaks */
+.data-table { width: 100%; font-size: 0.85rem; }
+.data-table th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.data-table td { vertical-align: middle; }
+.text-right { text-align: right; }
+.text-center { text-align: center; }
+.text-muted { color: var(--pico-muted-color, #666); }
+.overflow-auto { overflow-x: auto; }
+
+/* Job progress */
+.job-progress {
+  padding: 1rem;
+  border: 2px dashed var(--pico-muted-border-color, #ccc);
+  border-radius: 8px;
+  text-align: center;
+  margin: 1rem 0;
+}
+.job-progress .spinner {
+  display: inline-block;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 3px solid var(--pico-muted-border-color, #ccc);
+  border-top-color: var(--pico-primary, #1095c1);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 0.5rem;
+  vertical-align: middle;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* HTMX indicator */
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator, .htmx-indicator.htmx-request { display: inline-block; }
+
+/* Progress bar styling */
+progress {
+  height: 1.25rem;
+  border-radius: 6px;
+}
+
+/* Footer */
+footer {
+  margin-top: 3rem;
+  padding: 1rem 0;
+  text-align: center;
+  border-top: 1px solid var(--pico-muted-border-color, #ddd);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  nav.top-nav { padding: 0.4rem; }
+  nav.top-nav a { padding: 0.3rem 0.5rem; font-size: 0.8rem; }
+  .metric-grid { grid-template-columns: repeat(2, 1fr); }
+}

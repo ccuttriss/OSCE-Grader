@@ -1,0 +1,49 @@
+{% extends "layout.html" %}
+{% block title %}Grade Notes — OSCE Grader{% endblock %}
+{% block content %}
+<h2>Grade Student Notes</h2>
+<p>Upload your rubric, answer key, and student notes to begin grading.</p>
+
+<form hx-post="/api/grade" hx-target="#result-area" hx-swap="innerHTML" hx-encoding="multipart/form-data" hx-indicator="#submit-indicator">
+  <div class="grid">
+    <label>
+      Rubric (.xlsx)
+      <input type="file" name="rubric" accept=".xlsx" required>
+    </label>
+    <label>
+      Answer Key (.xlsx)
+      <input type="file" name="answer_key" accept=".xlsx" required>
+    </label>
+    <label>
+      Student Notes (.xlsx)
+      <input type="file" name="notes" accept=".xlsx" required>
+    </label>
+  </div>
+
+  <div class="grid">
+    <label>
+      Temperature
+      <input type="number" name="temperature" value="0.1" min="0" max="2" step="0.1">
+      <small>Lower = more consistent (0.0–2.0)</small>
+    </label>
+    <div>
+      <label>&nbsp;</label>
+      <div class="action-bar" style="margin-top: 0.25rem;">
+        <button type="submit" name="action" value="grade">Grade</button>
+        <button type="submit" name="action" value="dry_run" class="outline">Dry Run</button>
+      </div>
+      <small>Dry Run counts API calls without grading</small>
+    </div>
+  </div>
+</form>
+
+<span id="submit-indicator" class="htmx-indicator">
+  <span class="spinner"></span> Uploading files...
+</span>
+
+<div id="result-area">
+  {% if error %}
+  <div class="alert alert-critical">{{ error }}</div>
+  {% endif %}
+</div>
+{% endblock %}

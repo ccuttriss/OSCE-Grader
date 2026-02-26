@@ -1,0 +1,17 @@
+[Unit]
+Description=OSCE Grader Web App
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/data/repos/osce-grader/web
+ExecStart=/data/ai-env/bin/python /data/repos/osce-grader/web/run.py
+Restart=on-failure
+RestartSec=5
+
+# Environment
+EnvironmentFile=/data/repos/osce-grader/web/.env
+
+[Install]
+WantedBy=multi-user.target

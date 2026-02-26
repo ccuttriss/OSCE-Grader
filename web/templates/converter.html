@@ -1,0 +1,25 @@
+{% extends "layout.html" %}
+{% block title %}Convert Rubric — OSCE Grader{% endblock %}
+{% block content %}
+<h2>Convert Rubric</h2>
+<p>Upload a rubric in PDF or DOCX format and download it as an Excel file. The output will need manual restructuring before use with the grader.</p>
+
+<form hx-post="/api/convert" hx-target="#result-area" hx-swap="innerHTML" hx-encoding="multipart/form-data">
+  <div class="grid">
+    <label>
+      Rubric File (.pdf or .docx)
+      <input type="file" name="rubric_file" accept=".pdf,.docx" required>
+    </label>
+    <div>
+      <label>&nbsp;</label>
+      <button type="submit" style="margin-top: 0.25rem;">Convert to Excel</button>
+    </div>
+  </div>
+</form>
+
+<div id="result-area">
+  {% if error %}
+  <div class="alert alert-critical">{{ error }}</div>
+  {% endif %}
+</div>
+{% endblock %}

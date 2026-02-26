@@ -1,0 +1,10 @@
+<div class="job-progress" hx-get="/api/jobs/{{ job_id }}" hx-trigger="every 2s" hx-swap="outerHTML">
+  <span class="spinner"></span>
+  <strong>{{ message }}</strong>
+  {% if total > 0 %}
+  <div style="margin-top: 0.75rem;">
+    <progress value="{{ progress }}" max="{{ total }}" style="width: 100%;"></progress>
+    <small>{{ progress }} / {{ total }} students</small>
+  </div>
+  {% endif %}
+</div>
