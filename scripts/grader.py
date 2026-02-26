@@ -1,8 +1,9 @@
 """OSCE Grader - AI-powered grading for medical student post-encounter notes.
 
 Reads student notes, a rubric, and an answer key from Excel files, sends each
-section to an OpenAI model for evaluation, and writes scored results back to
-Excel.
+section to an LLM for evaluation, and writes scored results back to Excel.
+
+Supports multiple LLM providers: OpenAI, Anthropic (Claude), and Google (Gemini).
 """
 
 from __future__ import annotations
@@ -12,70 +13,20 @@ import datetime
 import logging
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import pandas as pd
-from openai import OpenAI
 
 import config
+from providers import LLMCaller, SUPPORTED_PROVIDERS, create_caller
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 logger = logging.getLogger("osce_grader")
-
-# ---------------------------------------------------------------------------
-# Resolve the directory this script lives in, so relative paths (like
-# api_key.txt) work regardless of the caller's working directory.
-# ---------------------------------------------------------------------------
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-# ---------------------------------------------------------------------------
-# API key helpers
-# ---------------------------------------------------------------------------
-
-def get_api_key() -> str:
-    """Return the OpenAI API key.
-
-    Resolution order:
-      1. OPENAI_API_KEY environment variable (if set and non-empty)
-      2. Contents of config.API_KEY_FILE (resolved relative to the script
-         directory)
-
-    Raises SystemExit if no valid key can be found.
-    """
-    env_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if env_key:
-        return env_key
-
-    key_path = config.API_KEY_FILE
-    if not os.path.isabs(key_path):
-        key_path = os.path.join(SCRIPT_DIR, key_path)
-
-    try:
-        with open(key_path, "r", encoding="utf-8") as file:
-            key = file.read().strip()
-    except FileNotFoundError:
-        logger.error(
-            "API key file not found at '%s'.\n"
-            "Either create the file or set the OPENAI_API_KEY environment "
-            "variable.",
-            key_path,
-        )
-        raise SystemExit(1)
-
-    if not key:
-        logger.error(
-            "API key file '%s' is empty. Please add your OpenAI API key to "
-            "the file or set the OPENAI_API_KEY environment variable.",
-            key_path,
-        )
-        raise SystemExit(1)
-
-    return key
-
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -129,6 +80,8 @@ def read_rubric_and_key(
 # ---------------------------------------------------------------------------
 # Interaction logging (to file)
 # ---------------------------------------------------------------------------
+_log_lock = threading.Lock()
+
 
 def log_interaction(
     log_file: str,
@@ -137,10 +90,11 @@ def log_interaction(
 ) -> None:
     """Append an LLM interaction to the log file.
 
-    Failures are logged as warnings but do not interrupt grading.
+    Thread-safe via ``_log_lock``.  Failures are logged as warnings but do
+    not interrupt grading.
     """
     try:
-        with open(log_file, "a", encoding="utf-8") as log:
+        with _log_lock, open(log_file, "a", encoding="utf-8") as log:
             log.write("----- Interaction -----\n")
             for message in messages:
                 log.write(f"{message['role']}: {message['content']}\n")
@@ -151,16 +105,16 @@ def log_interaction(
 
 
 # ---------------------------------------------------------------------------
-# OpenAI API wrapper
+# LLM API wrapper
 # ---------------------------------------------------------------------------
 
-def call_openai(
-    client: OpenAI,
+def call_llm(
+    caller: LLMCaller,
     messages: list[dict[str, str]],
     temperature: float,
     top_p: float,
 ) -> str:
-    """Call the OpenAI chat completions endpoint with retry logic.
+    """Call the LLM with retry logic.
 
     Retries up to ``config.MAX_RETRIES`` times with exponential back-off on
     transient failures (rate-limits, network errors, server errors).
@@ -170,13 +124,7 @@ def call_openai(
 
     for attempt in range(1, config.MAX_RETRIES + 1):
         try:
-            response = client.chat.completions.create(
-                model=config.MODEL,
-                messages=messages,
-                temperature=temperature,
-                top_p=top_p,
-            )
-            return response.choices[0].message.content.strip()
+            return caller(messages, temperature, top_p)
         except Exception as exc:
             last_exception = exc
             if attempt < config.MAX_RETRIES:
@@ -237,7 +185,7 @@ def extract_score(text: str) -> Optional[int]:
 # ---------------------------------------------------------------------------
 
 def grade_section_with_key(
-    client: OpenAI,
+    caller: LLMCaller,
     rubric_content: dict[str, str],
     answer_key_content: dict[str, str],
     section_content: str,
@@ -268,7 +216,7 @@ def grade_section_with_key(
         },
     ]
 
-    score_text = call_openai(client, messages, temperature, top_p)
+    score_text = call_llm(caller, messages, temperature, top_p)
     log_interaction(log_file, messages, score_text)
 
     numeric_score = extract_score(score_text)
@@ -332,15 +280,21 @@ def _save_results(df: pd.DataFrame, output_file: str) -> None:
 # ---------------------------------------------------------------------------
 
 def process_excel_file_with_key(
-    client: OpenAI,
+    caller: LLMCaller,
     excel_file: str,
     rubric_content: dict[str, str],
     answer_key_content: dict[str, str],
     output_file: str,
     temperature: float,
     top_p: float,
+    max_workers: int = 1,
 ) -> None:
-    """Grade every student row in the Excel file and write results."""
+    """Grade every student row in the Excel file and write results.
+
+    When *max_workers* > 1 the sections within each student are graded
+    concurrently using a thread pool, which can dramatically reduce wall-
+    clock time (e.g. 4 sections in parallel ≈ 4× faster).
+    """
     df = _read_excel_safe(excel_file, "student notes")
     log_file = os.path.splitext(output_file)[0] + ".log"
     sections = config.SECTIONS
@@ -365,25 +319,50 @@ def process_excel_file_with_key(
         )
         return
 
+    effective_workers = min(max_workers, len(sections))
+    if effective_workers > 1:
+        logger.info(
+            "Parallel mode: grading up to %d sections concurrently.",
+            effective_workers,
+        )
+
     for index, row in df.iterrows():
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
             "%s - Processing row %d/%d...", current_time, index + 1, total_rows
         )
 
+        # Collect sections that have content to grade
+        gradable: list[tuple[str, str]] = []
         for section in sections:
             section_content = row[section]
             if pd.notna(section_content):
+                gradable.append((section, str(section_content)))
+
+        if effective_workers <= 1 or len(gradable) <= 1:
+            # --- Sequential path (original behaviour) ---
+            for section, content in gradable:
                 explanation, numeric_score = grade_section_with_key(
-                    client,
-                    rubric_content,
-                    answer_key_content,
-                    section_content,
-                    section,
-                    log_file,
-                    temperature,
-                    top_p,
+                    caller, rubric_content, answer_key_content,
+                    content, section, log_file, temperature, top_p,
                 )
+                df.at[index, f"{section}_gpt_explanation"] = explanation
+                df.at[index, f"{section}_gpt_score"] = numeric_score
+        else:
+            # --- Parallel path: grade all sections concurrently ---
+            futures: dict[str, any] = {}
+            with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+                for section, content in gradable:
+                    future = pool.submit(
+                        grade_section_with_key,
+                        caller, rubric_content, answer_key_content,
+                        content, section, log_file, temperature, top_p,
+                    )
+                    futures[section] = future
+
+            # Collect results (all futures are done after exiting the 'with')
+            for section, future in futures.items():
+                explanation, numeric_score = future.result()
                 df.at[index, f"{section}_gpt_explanation"] = explanation
                 df.at[index, f"{section}_gpt_score"] = numeric_score
 
@@ -404,7 +383,7 @@ def process_excel_file_with_key(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Grade OSCE post-encounter notes from an Excel file "
-        "using OpenAI with a rubric and answer key.",
+        "using an LLM with a rubric and answer key.",
     )
     parser.add_argument(
         "--rubric",
@@ -442,6 +421,31 @@ def main() -> None:
         default=config.TOP_P,
         help="Top-p (nucleus sampling) setting, 0.0-1.0 (default: %(default)s)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=config.MAX_WORKERS,
+        help=(
+            "Number of sections to grade in parallel per student. "
+            "Set to 1 for sequential processing (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default=config.PROVIDER,
+        choices=SUPPORTED_PROVIDERS,
+        help="LLM provider to use (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help=(
+            "Model name to use. If not specified, uses config.py MODEL or "
+            "the provider's default model."
+        ),
+    )
     args = parser.parse_args()
 
     # --- Configure console logging ---
@@ -450,11 +454,21 @@ def main() -> None:
         format="%(levelname)s: %(message)s",
     )
 
+    # --- Resolve model for the selected provider ---
+    if args.model:
+        config.MODEL = args.model
+    elif args.provider != config.PROVIDER:
+        # User switched providers via CLI but didn't specify --model.
+        # Use the provider's default model instead of the config.py default.
+        config.MODEL = config.DEFAULT_MODELS.get(args.provider, config.MODEL)
+
     # --- Validate parameter ranges ---
-    if not 0.0 <= args.temperature <= 2.0:
+    max_temp = 1.0 if args.provider == "anthropic" else 2.0
+    if not 0.0 <= args.temperature <= max_temp:
         logger.error(
-            "Invalid --temperature value: %.2f. Must be between 0.0 and 2.0.",
-            args.temperature,
+            "Invalid --temperature value: %.2f. Must be between 0.0 and %.1f"
+            " for %s.",
+            args.temperature, max_temp, args.provider,
         )
         raise SystemExit(1)
 
@@ -481,20 +495,22 @@ def main() -> None:
         )
         raise SystemExit(1)
 
-    # --- Initialise the OpenAI client ---
-    client = OpenAI(api_key=get_api_key())
+    # --- Initialise the LLM caller ---
+    caller = create_caller(args.provider)
+    logger.info("Provider: %s | Model: %s", args.provider, config.MODEL)
 
     rubric_content, answer_key_content = read_rubric_and_key(
         args.rubric, args.answer_key
     )
     process_excel_file_with_key(
-        client,
+        caller,
         args.notes,
         rubric_content,
         answer_key_content,
         args.output,
         args.temperature,
         args.top_p,
+        max_workers=args.workers,
     )
 
 
