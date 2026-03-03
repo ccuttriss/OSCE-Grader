@@ -23,6 +23,10 @@ import pandas as pd
 import config
 from providers import LLMCaller, SUPPORTED_PROVIDERS, create_caller
 
+
+class GraderError(Exception):
+    """Raised when a grading operation fails (bad input, missing files, etc.)."""
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -47,7 +51,7 @@ def _read_excel_safe(path: str, label: str) -> pd.DataFrame:
             path,
             exc,
         )
-        raise SystemExit(1)
+        raise GraderError(f"Failed to read {label} file '{path}': {exc}")
 
 
 def read_rubric_and_key(
@@ -58,20 +62,16 @@ def read_rubric_and_key(
     Each file is expected to have a header row with section names and at least
     one data row containing the rubric / answer-key text for each section.
 
-    Raises SystemExit if either file is empty or cannot be read.
+    Raises GraderError if either file is empty or cannot be read.
     """
     rubric_df = _read_excel_safe(rubric_file, "rubric")
     if rubric_df.empty:
-        logger.error("Rubric file '%s' contains no data rows.", rubric_file)
-        raise SystemExit(1)
+        raise GraderError(f"Rubric file '{rubric_file}' contains no data rows.")
     rubric: dict[str, str] = rubric_df.iloc[0].to_dict()
 
     answer_key_df = _read_excel_safe(answer_key_file, "answer key")
     if answer_key_df.empty:
-        logger.error(
-            "Answer-key file '%s' contains no data rows.", answer_key_file
-        )
-        raise SystemExit(1)
+        raise GraderError(f"Answer-key file '{answer_key_file}' contains no data rows.")
     answer_key: dict[str, str] = answer_key_df.iloc[0].to_dict()
 
     return rubric, answer_key
@@ -184,6 +184,21 @@ def extract_score(text: str) -> Optional[int]:
 # Grading
 # ---------------------------------------------------------------------------
 
+def _row_already_graded(row: pd.Series, sections: list[str]) -> bool:
+    """Check whether a row has already been fully graded.
+
+    Returns True if every section that has content also has a score.
+    Used for resume capability — skip rows that were graded in a
+    previous (interrupted) run.
+    """
+    for section in sections:
+        has_content = pd.notna(row.get(section))
+        has_score = pd.notna(row.get(f"{section}_gpt_score"))
+        if has_content and not has_score:
+            return False
+    return True
+
+
 def grade_section_with_key(
     caller: LLMCaller,
     rubric_content: dict[str, str],
@@ -228,6 +243,75 @@ def grade_section_with_key(
         )
 
     return score_text, numeric_score
+
+
+# ---------------------------------------------------------------------------
+# Validation helpers
+# ---------------------------------------------------------------------------
+
+def compute_summary_stats(df: pd.DataFrame, sections: list[str]) -> list[dict]:
+    """Return per-section stats as a list of dicts."""
+    stats = []
+    for section in sections:
+        score_col = f"{section}_gpt_score"
+        if score_col in df.columns:
+            scores = pd.to_numeric(df[score_col], errors="coerce").dropna()
+            if len(scores) > 0:
+                stats.append({
+                    "section": section.upper(),
+                    "mean": round(scores.mean(), 1),
+                    "median": round(scores.median(), 1),
+                    "min": int(scores.min()),
+                    "max": int(scores.max()),
+                    "std": round(scores.std(), 1),
+                    "count": len(scores),
+                })
+    return stats
+
+
+def run_dry_run(
+    notes_path: str,
+    rubric_path: str,
+    answer_key_path: str,
+) -> dict:
+    """Count API calls and estimate cost without actually grading.
+
+    Returns a dict with summary info.
+    """
+    rubric_content, answer_key_content = read_rubric_and_key(
+        rubric_path, answer_key_path
+    )
+    df = _read_excel_safe(notes_path, "student notes")
+    sections = config.SECTIONS
+
+    missing = validate_input_columns(df, sections)
+    if missing:
+        raise ValueError(
+            f"Missing columns in student notes: {', '.join(missing)}. "
+            f"Expected: {', '.join(sections)}"
+        )
+
+    total_rows = len(df)
+    if total_rows == 0:
+        raise ValueError("Student notes file contains no data rows.")
+
+    api_calls = 0
+    for _, row in df.iterrows():
+        for section in sections:
+            if pd.notna(row.get(section)):
+                api_calls += 1
+
+    cost_per_call = config.MODEL_COSTS.get(config.MODEL, (0.15, 0.60))
+    # Rough estimate: ~1K input tokens + ~0.5K output tokens per call
+    est_cost = api_calls * (cost_per_call[0] * 1.0 / 1000 + cost_per_call[1] * 0.5 / 1000)
+
+    return {
+        "total_rows": total_rows,
+        "api_calls": api_calls,
+        "est_cost": f"${est_cost:.2f}",
+        "model": config.MODEL,
+        "sections": sections,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +410,22 @@ def process_excel_file_with_key(
             effective_workers,
         )
 
+    # --- Resume support: check for existing output file ---
+    if os.path.isfile(output_file):
+        try:
+            existing_df = pd.read_excel(output_file)
+            if set(df.columns).issubset(set(existing_df.columns)):
+                df = existing_df
+                logger.info("Loaded existing results from '%s' for resume.", output_file)
+        except Exception:
+            pass  # fresh start if existing file can't be read
+
     for index, row in df.iterrows():
+        # Skip rows already fully graded (resume capability)
+        if _row_already_graded(row, sections):
+            logger.info("Row %d/%d already graded, skipping.", index + 1, total_rows)
+            continue
+
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
             "%s - Processing row %d/%d...", current_time, index + 1, total_rows

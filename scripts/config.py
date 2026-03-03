@@ -95,3 +95,30 @@ MODEL_COSTS = {
     "gemini-2.5-flash":    (0.30,  2.50),
     "gemini-2.5-pro":      (1.25, 10.00),
 }
+
+# ---------------------------------------------------------------------------
+# Rubric conversion prompt (used by Streamlit and CLI rubric converter)
+# ---------------------------------------------------------------------------
+CONVERT_PROMPT = """\
+You are a medical education assistant. I will give you the raw text extracted \
+from a rubric document used to grade OSCE post-encounter notes.
+
+Your job is to identify the scoring criteria for each of these standard sections:
+
+- **hpi** — History of Present Illness
+- **pex** — Physical Examination
+- **sum** — Summary Statement
+- **ddx** — Differential Diagnosis
+- **support** — Supporting Data / Evidence for the differential
+- **plan** — Diagnostic Workup / Management Plan
+
+For each section, extract the FULL scoring rubric text (e.g. "4) Almost all key \
+information is present... 3) Most key findings... 2) Many omitted... 1) ...").
+
+If the document also contains an **org** (Organization) section, include it too.
+
+If a section is not found in the document, set its value to an empty string.
+
+Respond with ONLY valid JSON in this exact format (no markdown, no extra text):
+{"hpi": "full rubric text for hpi...", "pex": "...", "sum": "...", "ddx": "...", "support": "...", "plan": "...", "org": "..."}
+"""

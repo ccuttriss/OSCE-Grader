@@ -31,18 +31,14 @@ from grader import (
     _read_excel_safe,
     _save_results,
     call_llm,
+    compute_summary_stats,
     grade_section_with_key,
     read_rubric_and_key,
+    run_dry_run,
     validate_input_columns,
 )
 from providers import create_caller
-
-# Also import text extraction and LLM conversion from web worker
-WEB_DIR = os.path.join(REPO_ROOT, "web")
-sys.path.insert(0, WEB_DIR)
-from grading_worker import CONVERT_PROMPT, compute_summary_stats, run_dry_run
-
-from scripts.convert_rubric import convert_docx_to_text, convert_pdf_to_text
+from convert_rubric import convert_docx_to_text, convert_pdf_to_text
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -799,18 +795,27 @@ def tab_convert():
         st.info("Upload a PDF or DOCX rubric file to convert it.")
         return
 
-    # Check for OpenAI API key (rubric conversion uses OpenAI)
-    env_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not env_key:
+    # Model selection for conversion
+    convert_model = st.selectbox(
+        "Model for conversion",
+        list(MODEL_INFO.keys()),
+        index=list(MODEL_INFO.keys()).index("gpt-4o"),
+        key="convert_model",
+    )
+    convert_provider = MODEL_INFO[convert_model]["provider"]
+    convert_env_var = API_KEY_ENV_VARS[convert_provider]
+    has_convert_key = bool(os.environ.get(convert_env_var, "").strip())
+
+    if not has_convert_key:
         convert_key = st.text_input(
-            "OpenAI API Key (required for rubric conversion)",
+            f"{PROVIDER_LABELS[convert_provider]} API Key (required for conversion)",
             type="password",
             key="convert_api_key",
         )
         if not convert_key:
-            st.warning("An OpenAI API key is required for LLM-based rubric conversion.")
+            st.warning(f"A {PROVIDER_LABELS[convert_provider]} API key is required for rubric conversion.")
             return
-        os.environ["OPENAI_API_KEY"] = convert_key
+        os.environ[convert_env_var] = convert_key
 
     if st.button("Convert Rubric", type="primary"):
         # Save uploaded file
@@ -836,15 +841,14 @@ def tab_convert():
 
         with st.spinner("Parsing rubric with AI..."):
             try:
-                # Use OpenAI for conversion (matches web worker behavior)
                 old_model = config.MODEL
                 old_provider = config.PROVIDER
-                config.MODEL = "gpt-4o"
-                config.PROVIDER = "openai"
+                config.MODEL = convert_model
+                config.PROVIDER = convert_provider
 
-                caller = create_caller("openai")
+                caller = create_caller(convert_provider)
                 messages = [
-                    {"role": "system", "content": CONVERT_PROMPT},
+                    {"role": "system", "content": config.CONVERT_PROMPT},
                     {"role": "user", "content": raw_text},
                 ]
                 response = call_llm(caller, messages, temperature=0.0, top_p=1.0)
