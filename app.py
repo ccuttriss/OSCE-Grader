@@ -509,7 +509,7 @@ def tab_analysis():
     stdout_capture = io.StringIO()
     with contextlib.redirect_stdout(stdout_capture):
         try:
-            from scripts.evaluate import evaluate
+            from evaluate import evaluate
             results = evaluate(tmp_path, sections=sections, model=config.MODEL)
         except SystemExit:
             st.error("Evaluation failed. Check that the file has the required columns.")
@@ -883,8 +883,8 @@ def tab_convert():
         # Show results
         st.success("Rubric converted successfully!")
 
-        found = [k for k, v in parsed.items() if v.strip()]
-        empty = [k for k, v in parsed.items() if not v.strip()]
+        found = [k for k, v in parsed.items() if str(v or "").strip()]
+        empty = [k for k, v in parsed.items() if not str(v or "").strip()]
         st.info(f"Sections found: **{', '.join(s.upper() for s in found)}**")
         if empty:
             st.warning(f"Empty sections: {', '.join(s.upper() for s in empty)}")

@@ -124,8 +124,7 @@ def evaluate(results_path: str, sections: list[str] | None = None, model: str | 
         overall_exact_g2 = sum(1 for d in all_diffs_g2 if d == 0) / total * 100
         overall_within1_g1 = sum(1 for d in all_diffs_g1 if d <= 1) / total * 100
         overall_within1_g2 = sum(1 for d in all_diffs_g2 if d <= 1) / total * 100
-        overall_bias = sum(d for d in (pd.Series(all_diffs_avg))) / total  # unsigned
-        # For signed bias, recalculate
+        # Calculate signed bias (negative = GPT grades harsher)
         all_signed = []
         for section in sections:
             if section not in results:

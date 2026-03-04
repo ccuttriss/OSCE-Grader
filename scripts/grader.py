@@ -16,7 +16,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 
@@ -144,6 +144,10 @@ def call_llm(
                     exc,
                 )
                 raise last_exception  # type: ignore[misc]
+
+    # Should be unreachable when MAX_RETRIES >= 1, but guard against
+    # misconfiguration (MAX_RETRIES == 0).
+    raise GraderError("call_llm: MAX_RETRIES is set to 0; no API call was attempted.")
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +453,7 @@ def process_excel_file_with_key(
                 df.at[index, f"{section}_gpt_score"] = numeric_score
         else:
             # --- Parallel path: grade all sections concurrently ---
-            futures: dict[str, any] = {}
+            futures: dict[str, Any] = {}
             with ThreadPoolExecutor(max_workers=effective_workers) as pool:
                 for section, content in gradable:
                     future = pool.submit(
