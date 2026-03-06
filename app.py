@@ -144,6 +144,50 @@ API_KEY_ENV_VARS = {
     "google": "GOOGLE_API_KEY",
 }
 
+# ---------------------------------------------------------------------------
+# Persistent API key storage (.env file, already gitignored)
+# ---------------------------------------------------------------------------
+_ENV_FILE = os.path.join(REPO_ROOT, ".env")
+
+
+def _load_env_file() -> None:
+    """Load API keys from .env into os.environ (does not overwrite existing)."""
+    if not os.path.isfile(_ENV_FILE):
+        return
+    with open(_ENV_FILE) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip()
+            if key and value and not os.environ.get(key):
+                os.environ[key] = value
+
+
+def _save_api_key_to_env(env_var: str, value: str) -> None:
+    """Persist an API key to the .env file."""
+    lines: list[str] = []
+    found = False
+    if os.path.isfile(_ENV_FILE):
+        with open(_ENV_FILE) as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith(env_var + "="):
+                    lines.append(f"{env_var}={value}\n")
+                    found = True
+                else:
+                    lines.append(line if line.endswith("\n") else line + "\n")
+    if not found:
+        lines.append(f"{env_var}={value}\n")
+    with open(_ENV_FILE, "w") as f:
+        f.writelines(lines)
+    os.environ[env_var] = value
+
+
+# Load persisted keys on startup
+_load_env_file()
+
 
 # ---------------------------------------------------------------------------
 # Helper: save uploaded file to a temp path
@@ -393,7 +437,7 @@ def tab_grade_notes():
     # --- Set API key if provided ---
     def _set_api_key():
         if api_key_input and not has_env_key:
-            os.environ[env_var] = api_key_input
+            _save_api_key_to_env(env_var, api_key_input)
 
     # --- Set config for the selected model ---
     def _set_config():
@@ -1062,7 +1106,7 @@ def tab_convert():
         if not convert_key:
             st.warning(f"A {PROVIDER_LABELS[convert_provider]} API key is required for rubric conversion.")
             return
-        os.environ[convert_env_var] = convert_key
+        _save_api_key_to_env(convert_env_var, convert_key)
 
     if st.button("Convert Rubric", type="primary"):
         # Save uploaded file
@@ -1535,7 +1579,7 @@ def tab_gold_standard():
             return
 
         if gs_api_key_input and not gs_has_key:
-            os.environ[gs_env_var] = gs_api_key_input
+            _save_api_key_to_env(gs_env_var, gs_api_key_input)
 
         with st.spinner("Running LLM bias analysis..."):
             try:
@@ -1885,7 +1929,7 @@ def tab_synthetic_generator():
             return
 
         if synth_api_key and not synth_has_key:
-            os.environ[synth_env_var] = synth_api_key
+            _save_api_key_to_env(synth_env_var, synth_api_key)
 
         # Load example files from persistent storage
         example_rubric_text = None
