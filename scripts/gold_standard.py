@@ -318,6 +318,121 @@ def validate_sessions(sessions: list[SessionData]) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Example / demo sessions
+# ---------------------------------------------------------------------------
+
+# Realistic score ranges per section for each assessment type.
+# Format: {section_key: (low, high)} where low-high is the typical faculty
+# score corridor.  The three built-in example sessions use these to simulate
+# a "stable year", a "lenient year", and a "strict year".
+_EXAMPLE_RANGES: dict[str, dict[str, tuple[float, float]]] = {
+    "kpsom_ipass": {
+        "illness_severity": (1.0, 2.0),
+        "patient_summary": (7.0, 13.0),
+        "action_list": (2.0, 5.0),
+        "situation_awareness": (1.0, 3.0),
+        "organization": (1.0, 3.0),
+    },
+    "kpsom_documentation": {
+        "hpi": (2.0, 5.0),
+        "social_hx": (2.0, 5.0),
+        "summary_statement": (1.5, 4.5),
+        "assessment": (2.0, 5.0),
+        "plan": (2.0, 5.0),
+        "org_lang": (1.5, 4.0),
+    },
+    "kpsom_ethics": {
+        "q1_total": (2.0, 8.0),
+        "q2a_score": (1.0, 4.0),
+        "q2b_score": (1.0, 4.0),
+        "q2c_score": (1.0, 4.0),
+        "q3_total": (2.0, 8.0),
+    },
+    "uk_osce": {
+        "hpi": (2.0, 5.0),
+        "pex": (2.0, 5.0),
+        "sum": (1.5, 4.5),
+        "ddx": (1.5, 4.5),
+        "support": (2.0, 5.0),
+        "plan": (2.0, 5.0),
+    },
+}
+
+
+def generate_example_sessions(
+    assessment_type_id: str,
+    *,
+    n_sessions: int = 3,
+    students_per_session: int = 8,
+    seed: int = 42,
+) -> list[SessionData]:
+    """Create synthetic example sessions for demonstration and testing.
+
+    Returns *n_sessions* ``SessionData`` objects with realistic score
+    distributions.  The first session represents a "typical" year, the second
+    a slightly lenient year, and the third a slightly strict year so that the
+    consensus analysis produces meaningful variation.
+
+    Parameters
+    ----------
+    assessment_type_id:
+        One of the keys in ``_SECTION_KEYS``.
+    n_sessions:
+        How many sessions to generate (2–10, default 3).
+    students_per_session:
+        Number of students per session (default 8).
+    seed:
+        Random seed for reproducibility.
+    """
+    sections = _SECTION_KEYS.get(assessment_type_id)
+    if sections is None:
+        raise ValueError(f"Unknown assessment type: {assessment_type_id}")
+
+    ranges = _EXAMPLE_RANGES.get(assessment_type_id)
+    if ranges is None:
+        raise ValueError(f"No example ranges defined for: {assessment_type_id}")
+
+    rng = np.random.default_rng(seed)
+
+    # Session-level bias offsets.  Session 0 is baseline,
+    # subsequent sessions shift ± to create realistic variation.
+    biases = [0.0]
+    for i in range(1, n_sessions):
+        # Alternate lenient / strict, growing slightly with index
+        biases.append(0.35 * ((-1) ** i) * ((i + 1) / 2))
+
+    labels = [
+        f"{2020 + i} {'Spring' if i % 2 == 0 else 'Fall'}"
+        for i in range(n_sessions)
+    ]
+
+    sessions: list[SessionData] = []
+    for s_idx in range(n_sessions):
+        scores: dict[int, dict] = {}
+        bias = biases[s_idx]
+        for sid in range(1, students_per_session + 1):
+            student: dict[str, float | None] = {}
+            for sec in sections:
+                lo, hi = ranges[sec]
+                mid = (lo + hi) / 2
+                spread = (hi - lo) / 2
+                # Normal distribution centred at mid + bias, clipped to [lo, hi]
+                raw = rng.normal(loc=mid + bias, scale=spread * 0.4)
+                student[sec] = round(float(np.clip(raw, lo, hi)), 1)
+            scores[sid] = student
+
+        sessions.append(SessionData(
+            label=labels[s_idx],
+            assessment_type_id=assessment_type_id,
+            sections=list(sections),
+            scores=scores,
+            student_count=students_per_session,
+        ))
+
+    return sessions
+
+
+# ---------------------------------------------------------------------------
 # Statistical analysis
 # ---------------------------------------------------------------------------
 
@@ -957,7 +1072,11 @@ def generate_benchmark_json(benchmark: GoldStandardBenchmark) -> str:
         c = benchmark.consensus
         data["consensus"] = {
             "eigenvalues": [round(v, 4) for v in c.eigenvalues],
-            "eigenvalue_ratio": round(c.eigenvalue_ratio, 3),
+            "eigenvalue_ratio": (
+                round(c.eigenvalue_ratio, 3)
+                if c.eigenvalue_ratio != float("inf")
+                else None
+            ),
             "single_culture_holds": c.single_culture_holds,
             "fit_label": c.fit_label,
             "has_negative_loadings": c.has_negative_loadings,

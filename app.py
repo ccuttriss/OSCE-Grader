@@ -46,6 +46,7 @@ from gold_standard import (
     validate_sessions,
     compute_cross_session_stats,
     compute_consensus_analysis,
+    generate_example_sessions,
     build_bias_prompt,
     parse_bias_response,
     generate_benchmark_excel,
@@ -1106,59 +1107,97 @@ def tab_gold_standard():
         key="gs_type_select",
     )
 
-    # --- File upload ---
-    uploaded = st.file_uploader(
-        "Upload faculty score files (2\u201310 Excel files)",
-        type=["xlsx"],
-        accept_multiple_files=True,
-        key="gs_files",
+    # --- Data source selector ---
+    data_source = st.radio(
+        "Data source",
+        ["Upload files", "Use built-in examples"],
+        horizontal=True,
+        key="gs_data_source",
+        help="Use built-in examples to explore the tool before uploading your own data.",
     )
 
-    if not uploaded:
-        st.info("Upload at least 2 faculty score files to begin.")
-        return
+    if data_source == "Use built-in examples":
+        ecol1, ecol2 = st.columns(2)
+        with ecol1:
+            n_sessions = st.slider(
+                "Number of example sessions",
+                min_value=2,
+                max_value=6,
+                value=3,
+                key="gs_example_n",
+            )
+        with ecol2:
+            students_per = st.slider(
+                "Students per session",
+                min_value=4,
+                max_value=20,
+                value=8,
+                key="gs_example_students",
+            )
 
-    if len(uploaded) < 2:
-        st.warning("At least 2 files are required for cross-session analysis.")
-        return
-    if len(uploaded) > 10:
-        st.error("Maximum of 10 files allowed. Please remove some files.")
-        return
+        if st.button("Load Examples", type="primary", key="gs_load_examples"):
+            sessions = generate_example_sessions(
+                gs_type_id,
+                n_sessions=n_sessions,
+                students_per_session=students_per,
+            )
+            st.session_state["gs_sessions"] = sessions
+            st.session_state["gs_type_id"] = gs_type_id
 
-    # --- Session labels ---
-    st.subheader("Session Labels")
-    st.caption("Provide a label for each file (e.g., '2023 Spring', '2024 Fall').")
-    labels = []
-    for i, f in enumerate(uploaded):
-        lbl = st.text_input(
-            f"Label for {f.name}",
-            value=f"Session {i + 1}",
-            key=f"gs_label_{i}",
+    else:
+        # --- File upload ---
+        uploaded = st.file_uploader(
+            "Upload faculty score files (2\u201310 Excel files)",
+            type=["xlsx"],
+            accept_multiple_files=True,
+            key="gs_files",
         )
-        labels.append(lbl)
 
-    st.divider()
-
-    # --- Load sessions ---
-    if st.button("Analyze", type="primary", key="gs_analyze"):
-        sessions = []
-        with st.spinner("Loading faculty score files..."):
-            for i, f in enumerate(uploaded):
-                path = _save_upload(f)
-                try:
-                    session = load_faculty_session(path, gs_type_id, labels[i])
-                    sessions.append(session)
-                except Exception as exc:
-                    st.error(f"Error loading {f.name}: {exc}")
-                    return
-
-        err = validate_sessions(sessions)
-        if err:
-            st.error(err)
+        if not uploaded:
+            st.info("Upload at least 2 faculty score files to begin.")
             return
 
-        st.session_state["gs_sessions"] = sessions
-        st.session_state["gs_type_id"] = gs_type_id
+        if len(uploaded) < 2:
+            st.warning("At least 2 files are required for cross-session analysis.")
+            return
+        if len(uploaded) > 10:
+            st.error("Maximum of 10 files allowed. Please remove some files.")
+            return
+
+        # --- Session labels ---
+        st.subheader("Session Labels")
+        st.caption("Provide a label for each file (e.g., '2023 Spring', '2024 Fall').")
+        labels = []
+        for i, f in enumerate(uploaded):
+            lbl = st.text_input(
+                f"Label for {f.name}",
+                value=f"Session {i + 1}",
+                key=f"gs_label_{i}",
+            )
+            labels.append(lbl)
+
+        st.divider()
+
+        # --- Load sessions ---
+        if st.button("Analyze", type="primary", key="gs_analyze"):
+            sessions = []
+            with st.spinner("Loading faculty score files..."):
+                for i, f in enumerate(uploaded):
+                    path = _save_upload(f)
+                    try:
+                        session = load_faculty_session(path, gs_type_id, labels[i])
+                        sessions.append(session)
+                    except Exception as exc:
+                        st.error(f"Error loading {f.name}: {exc}")
+                        return
+
+            err = validate_sessions(sessions)
+            if err:
+                st.error(err)
+                return
+
+            st.session_state["gs_sessions"] = sessions
+            st.session_state["gs_type_id"] = gs_type_id
 
     # --- Display results if sessions are loaded ---
     if "gs_sessions" not in st.session_state:
