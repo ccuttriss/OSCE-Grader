@@ -365,6 +365,7 @@ def generate_example_sessions(
     n_sessions: int = 3,
     students_per_session: int = 8,
     seed: int = 42,
+    variability: float = 0.5,
 ) -> list[SessionData]:
     """Create synthetic example sessions for demonstration and testing.
 
@@ -383,6 +384,11 @@ def generate_example_sessions(
         Number of students per session (default 8).
     seed:
         Random seed for reproducibility.
+    variability:
+        Controls the amount of score variation (0.0–1.0).
+        0.0 = very tight / homogeneous scores (low spread, minimal session bias).
+        0.5 = moderate realistic variation (default).
+        1.0 = high variation (wide spread, large session-to-session drift).
     """
     sections = _SECTION_KEYS.get(assessment_type_id)
     if sections is None:
@@ -392,14 +398,22 @@ def generate_example_sessions(
     if ranges is None:
         raise ValueError(f"No example ranges defined for: {assessment_type_id}")
 
+    variability = max(0.0, min(1.0, variability))
+
     rng = np.random.default_rng(seed)
+
+    # Variability controls both within-session spread and between-session bias
+    # spread_factor: 0.15 (tight) → 0.40 (default) → 0.70 (wide)
+    spread_factor = 0.15 + 0.55 * variability
+    # bias_factor: 0.05 (nearly identical) → 0.35 (default) → 0.70 (large drift)
+    bias_factor = 0.05 + 0.65 * variability
 
     # Session-level bias offsets.  Session 0 is baseline,
     # subsequent sessions shift ± to create realistic variation.
     biases = [0.0]
     for i in range(1, n_sessions):
         # Alternate lenient / strict, growing slightly with index
-        biases.append(0.35 * ((-1) ** i) * ((i + 1) / 2))
+        biases.append(bias_factor * ((-1) ** i) * ((i + 1) / 2))
 
     labels = [
         f"{2020 + i} {'Spring' if i % 2 == 0 else 'Fall'}"
@@ -416,8 +430,7 @@ def generate_example_sessions(
                 lo, hi = ranges[sec]
                 mid = (lo + hi) / 2
                 spread = (hi - lo) / 2
-                # Normal distribution centred at mid + bias, clipped to [lo, hi]
-                raw = rng.normal(loc=mid + bias, scale=spread * 0.4)
+                raw = rng.normal(loc=mid + bias, scale=spread * spread_factor)
                 student[sec] = round(float(np.clip(raw, lo, hi)), 1)
             scores[sid] = student
 
@@ -430,6 +443,194 @@ def generate_example_sessions(
         ))
 
     return sessions
+
+
+# ---------------------------------------------------------------------------
+# Max scores per section (used for realistic Excel export)
+# ---------------------------------------------------------------------------
+
+_MAX_SCORES: dict[str, dict[str, float]] = {
+    "kpsom_ipass": {
+        "illness_severity": 2,
+        "patient_summary": 14,
+        "action_list": 5,
+        "situation_awareness": 3,
+        "organization": 3,
+    },
+    "kpsom_documentation": {
+        "hpi": 5,
+        "social_hx": 5,
+        "summary_statement": 5,
+        "assessment": 5,
+        "plan": 5,
+        "org_lang": 4,
+    },
+    "kpsom_ethics": {
+        "q1_total": 4,
+        "q2a_score": 4,
+        "q2b_score": 4,
+        "q2c_score": 4,
+        "q3_total": 8,
+    },
+    "uk_osce": {
+        "hpi": 5,
+        "pex": 5,
+        "sum": 5,
+        "ddx": 5,
+        "support": 5,
+        "plan": 5,
+    },
+}
+
+# Human-readable column labels for each section (per type)
+_SECTION_DISPLAY: dict[str, dict[str, str]] = {
+    "kpsom_ipass": {
+        "illness_severity": "Illness Severity",
+        "patient_summary": "Patient Summary",
+        "action_list": "Action List",
+        "situation_awareness": "Situation Awareness",
+        "organization": "Organization",
+    },
+    "kpsom_documentation": {
+        "hpi": "HPI",
+        "social_hx": "Social Hx",
+        "summary_statement": "Summary Statement",
+        "assessment": "Assessment",
+        "plan": "Plan",
+        "org_lang": "Org/Lang",
+    },
+    "kpsom_ethics": {
+        "q1_total": "Q1 Total",
+        "q2a_score": "Q2A Score",
+        "q2b_score": "Q2B Score",
+        "q2c_score": "Q2C Score",
+        "q3_total": "Q3 Total",
+    },
+    "uk_osce": {
+        "hpi": "HPI",
+        "pex": "Physical Exam",
+        "sum": "Summary Statement",
+        "ddx": "Differential Diagnosis",
+        "support": "Supporting Evidence",
+        "plan": "Plan",
+    },
+}
+
+
+def session_to_dataframe(session: SessionData) -> pd.DataFrame:
+    """Convert a SessionData to a human-readable DataFrame for preview."""
+    sections = session.sections
+    display = _SECTION_DISPLAY.get(session.assessment_type_id, {})
+    rows = []
+    for sid in sorted(session.scores.keys()):
+        row: dict[str, object] = {"Student": sid}
+        for sec in sections:
+            col_name = display.get(sec, sec)
+            row[col_name] = session.scores[sid].get(sec)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def session_to_excel(session: SessionData) -> bytes:
+    """Export a single session as an Excel file matching the loader format.
+
+    The output file can be re-imported via ``load_faculty_session`` for the
+    same assessment type, so users can download examples, inspect them, and
+    re-upload them as real data.
+    """
+    type_id = session.assessment_type_id
+    sections = session.sections
+    display = _SECTION_DISPLAY.get(type_id, {})
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Faculty Scores"
+
+    if type_id == "kpsom_ipass":
+        # Format: 2 blank header rows, then real headers at row 3, data at row 4+
+        ws.append([])  # row 1 (merged group header placeholder)
+        ws.append([])  # row 2 (merged group header placeholder)
+        headers = ["Student"] + [display.get(s, s) for s in sections]
+        ws.append(headers)  # row 3 = real headers
+        for sid in sorted(session.scores.keys()):
+            row = [sid] + [session.scores[sid].get(s) for s in sections]
+            ws.append(row)
+
+    elif type_id == "kpsom_documentation":
+        # Format: single header row with many columns; scores at specific indices
+        # We produce a simplified version that the loader can still parse:
+        # fill columns 0-73 with blanks except the score columns
+        n_cols = 74
+        header_row = [""] * n_cols
+        col_map = {29: "hpi", 34: "social_hx", 49: "summary_statement",
+                    58: "assessment", 72: "plan", 73: "org_lang"}
+        for idx, sec in col_map.items():
+            header_row[idx] = display.get(sec, sec)
+        ws.append(header_row)  # row 1 = header
+        for sid in sorted(session.scores.keys()):
+            data_row = [None] * n_cols
+            for idx, sec in col_map.items():
+                data_row[idx] = session.scores[sid].get(sec)
+            ws.append(data_row)
+
+    elif type_id == "kpsom_ethics":
+        # Format: row 0 = group labels, row 1 = sub-item labels, row 2+ = data
+        # Student ID in col 0, scores at specific column indices:
+        # q1_total=4, q2a=6, q2b=8, q2c=10, q3_total=16
+        n_cols = 20
+        group_row = [""] * n_cols
+        group_row[0] = "Student"
+        group_row[2] = "Q1"
+        group_row[6] = "Q2"
+        group_row[12] = "Q3"
+        ws.append(group_row)  # row 1 = group headers
+
+        sub_row = [""] * n_cols
+        sub_row[0] = "Student ID"
+        sub_row[2] = "Problematic"
+        sub_row[3] = "Reasonable"
+        sub_row[4] = "Q1 Total"
+        sub_row[6] = "Q2A"
+        sub_row[8] = "Q2B"
+        sub_row[10] = "Q2C"
+        sub_row[11] = "Q2 Total"
+        sub_row[12] = "Q3-1"
+        sub_row[13] = "Q3-2"
+        sub_row[14] = "Q3-3"
+        sub_row[15] = "Q3-4"
+        sub_row[16] = "Q3 Total"
+        sub_row[17] = "Task Total"
+        sub_row[18] = "Milestone"
+        ws.append(sub_row)  # row 2 = sub-item headers
+
+        score_col_map = {
+            "q1_total": 4,
+            "q2a_score": 6,
+            "q2b_score": 8,
+            "q2c_score": 10,
+            "q3_total": 16,
+        }
+        for sid in sorted(session.scores.keys()):
+            data_row = [None] * n_cols
+            data_row[0] = sid
+            for sec, col_idx in score_col_map.items():
+                data_row[col_idx] = session.scores[sid].get(sec)
+            ws.append(data_row)
+
+    elif type_id == "uk_osce":
+        # Simple flat format: student_id + section columns
+        headers = ["student_id"] + [s for s in sections]
+        ws.append(headers)
+        for sid in sorted(session.scores.keys()):
+            row = [sid] + [session.scores[sid].get(s) for s in sections]
+            ws.append(row)
+
+    else:
+        raise ValueError(f"Unknown assessment type: {type_id}")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
