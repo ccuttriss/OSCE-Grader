@@ -1932,165 +1932,223 @@ def tab_synthetic_generator():
         _cfg.MAX_TOKENS = _prev_max_tokens
         progress_bar.progress(1.0, text="Complete!")
         if sessions:
-            st.session_state["synth_sessions"] = sessions
-            st.session_state["synth_type_id"] = synth_type_id
+            # Build metadata about which example files grounded this generation
+            examples_used = []
+            if example_rubric_file:
+                examples_used.append(f"Rubric: {example_rubric_file.name}")
+            if example_notes_file:
+                examples_used.append(f"Student notes: {example_notes_file.name}")
+            if example_scores_file:
+                examples_used.append(f"Faculty scores: {example_scores_file.name}")
 
-    # --- Display results ---
-    if "synth_sessions" not in st.session_state:
+            generation_entry = {
+                "sessions": sessions,
+                "type_id": synth_type_id,
+                "examples_used": examples_used,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "model": synth_model,
+                "n_students": synth_n_students,
+            }
+
+            # Append to history (most recent first), keep up to 10
+            history = st.session_state.get("synth_history", [])
+            history.insert(0, generation_entry)
+            st.session_state["synth_history"] = history[:10]
+
+    # --- Display recent generations as collapsible expanders ---
+    if "synth_history" not in st.session_state:
         return
 
-    sessions = st.session_state["synth_sessions"]
-    synth_type_id = st.session_state["synth_type_id"]
-    meta = SYNTH_TYPE_META[synth_type_id]
+    history = st.session_state["synth_history"]
+    if not history:
+        return
 
     st.divider()
-    st.subheader("Generated Synthetic Data")
+    st.subheader("Recent Generations")
+    st.caption(f"Showing {len(history)} most recent generation(s) (max 10).")
 
-    session_tabs = st.tabs([s.label for s in sessions])
+    for gen_idx, generation in enumerate(history):
+        sessions = generation["sessions"]
+        gen_type_id = generation["type_id"]
+        gen_meta = SYNTH_TYPE_META[gen_type_id]
+        examples_used = generation["examples_used"]
+        timestamp = generation["timestamp"]
+        model_name = generation["model"]
+        n_students = generation["n_students"]
 
-    for tab, session in zip(session_tabs, sessions):
-        with tab:
-            # --- Faculty persona ---
-            with st.expander(f"Faculty Rater: {session.faculty.name}", expanded=False):
-                st.markdown(
-                    f"**Specialty:** {session.faculty.specialty}  \n"
-                    f"**Experience:** {session.faculty.years_experience} years  \n"
-                    f"**Scoring tendency:** {session.faculty.scoring_tendency} — "
-                    f"{session.faculty.background_note}  \n"
-                    f"**Focus areas:** {', '.join(session.faculty.focus_areas)}"
+        # Build header for the generation expander
+        session_labels = ", ".join(s.label for s in sessions)
+        type_label = synth_type_options.get(gen_type_id, gen_type_id)
+        gen_header = (
+            f"{type_label} — {len(sessions)} session(s) "
+            f"({session_labels}) — {timestamp}"
+        )
+
+        with st.expander(gen_header, expanded=(gen_idx == 0)):
+            # --- Example provenance banner ---
+            if examples_used:
+                st.info(
+                    "**Grounded in your examples:** "
+                    + " | ".join(examples_used)
+                )
+            else:
+                st.warning(
+                    "**No example files provided.** This generation used only "
+                    "the LLM's general medical knowledge — it was not grounded "
+                    "in your real rubrics, notes, or scores."
                 )
 
-            # --- Rubric ---
-            with st.expander("Rubric", expanded=False):
-                st.markdown(rubric_to_display_text(session.rubric))
-                rcol1, rcol2 = st.columns(2)
-                safe_lbl = session.label.replace(" ", "_")
-                with rcol1:
-                    st.download_button(
-                        "Download Rubric (.xlsx)",
-                        data=rubric_to_excel(session.rubric, synth_type_id),
-                        file_name=f"synth_{safe_lbl}_rubric.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"synth_dl_rubric_{safe_lbl}",
-                    )
-                if synth_type_id == "uk_osce":
-                    with rcol2:
-                        st.download_button(
-                            "Download Answer Key (.xlsx)",
-                            data=answer_key_to_excel(session.rubric, synth_type_id),
-                            file_name=f"synth_{safe_lbl}_answer_key.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key=f"synth_dl_ak_{safe_lbl}",
+            st.caption(f"Model: {model_name} · Students/session: {n_students}")
+
+            # Use sub-tabs for sessions within this generation
+            session_tabs = st.tabs([s.label for s in sessions])
+
+            for tab, session in zip(session_tabs, sessions):
+                with tab:
+                    # --- Faculty persona ---
+                    with st.expander(
+                        f"Faculty Rater: {session.faculty.name}",
+                        expanded=False,
+                    ):
+                        st.markdown(
+                            f"**Specialty:** {session.faculty.specialty}  \n"
+                            f"**Experience:** {session.faculty.years_experience} years  \n"
+                            f"**Scoring tendency:** {session.faculty.scoring_tendency} — "
+                            f"{session.faculty.background_note}  \n"
+                            f"**Focus areas:** {', '.join(session.faculty.focus_areas)}"
                         )
 
-            # --- Student notes preview ---
-            with st.expander("Student Notes", expanded=True):
-                notes_rows = []
-                for sid in sorted(session.student_notes.keys()):
-                    student = next(
-                        (s for s in session.students if s.student_id == sid), None
+                    # --- Rubric ---
+                    safe_lbl = session.label.replace(" ", "_")
+                    with st.expander("Rubric", expanded=False):
+                        st.markdown(rubric_to_display_text(session.rubric))
+                        rcol1, rcol2 = st.columns(2)
+                        with rcol1:
+                            st.download_button(
+                                "Download Rubric (.xlsx)",
+                                data=rubric_to_excel(session.rubric, gen_type_id),
+                                file_name=f"synth_{safe_lbl}_rubric.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"synth_dl_rubric_{gen_idx}_{safe_lbl}",
+                            )
+                        if gen_type_id == "uk_osce":
+                            with rcol2:
+                                st.download_button(
+                                    "Download Answer Key (.xlsx)",
+                                    data=answer_key_to_excel(session.rubric, gen_type_id),
+                                    file_name=f"synth_{safe_lbl}_answer_key.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key=f"synth_dl_ak_{gen_idx}_{safe_lbl}",
+                                )
+
+                    # --- Student notes preview ---
+                    with st.expander("Student Notes", expanded=True):
+                        notes_rows = []
+                        for sid in sorted(session.student_notes.keys()):
+                            student = next(
+                                (s for s in session.students if s.student_id == sid),
+                                None,
+                            )
+                            row = {"Student": sid}
+                            if student:
+                                row["Level"] = student.academic_level.split("—")[0].strip()
+                            for sec in session.sections:
+                                display = gen_meta["sections"][sec][0]
+                                text = session.student_notes[sid].get(sec, "")
+                                row[display] = (
+                                    (text[:120] + "...") if len(text) > 120 else text
+                                )
+                            notes_rows.append(row)
+                        st.dataframe(
+                            pd.DataFrame(notes_rows),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        st.download_button(
+                            "Download Student Notes (.xlsx)",
+                            data=student_notes_to_excel(session),
+                            file_name=f"synth_{safe_lbl}_student_notes.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"synth_dl_notes_{gen_idx}_{safe_lbl}",
+                        )
+
+                    # --- Faculty scores preview ---
+                    with st.expander("Faculty Scores", expanded=True):
+                        score_rows = []
+                        for sid in sorted(session.faculty_scores.keys()):
+                            row = {"Student": sid}
+                            for sec in session.sections:
+                                display = gen_meta["sections"][sec][0]
+                                row[display] = session.faculty_scores[sid].get(sec, "")
+                            score_rows.append(row)
+                        st.dataframe(
+                            pd.DataFrame(score_rows),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        st.download_button(
+                            "Download Faculty Scores (.xlsx)",
+                            data=faculty_scores_to_excel(session),
+                            file_name=f"synth_{safe_lbl}_faculty_scores.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"synth_dl_scores_{gen_idx}_{safe_lbl}",
+                        )
+
+                    # --- Student personas ---
+                    with st.expander("Student Personas", expanded=False):
+                        for student in session.students:
+                            st.markdown(
+                                f"**Student {student.student_id}**  \n"
+                                f"Background: {student.background}  \n"
+                                f"Level: {student.academic_level}  \n"
+                                f"Style: {student.writing_style}  \n"
+                                f"Strengths: {', '.join(student.clinical_strengths)}  \n"
+                                f"Weaknesses: {', '.join(student.clinical_weaknesses)}"
+                            )
+                            st.divider()
+
+                    # --- Full session download ---
+                    st.download_button(
+                        f"Download Full Session ({session.label}) as ZIP",
+                        data=session_to_zip(session),
+                        file_name=f"synth_{safe_lbl}_complete.zip",
+                        mime="application/zip",
+                        key=f"synth_dl_full_{gen_idx}_{safe_lbl}",
                     )
-                    row = {"Student": sid}
-                    if student:
-                        row["Level"] = student.academic_level.split("—")[0].strip()
-                    for sec in session.sections:
-                        display = meta["sections"][sec][0]
-                        text = session.student_notes[sid].get(sec, "")
-                        # Truncate for preview
-                        row[display] = (text[:120] + "...") if len(text) > 120 else text
-                    notes_rows.append(row)
-                st.dataframe(
-                    pd.DataFrame(notes_rows),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+
+            # --- Download all sessions in this generation ---
+            if len(sessions) > 1:
                 st.download_button(
-                    "Download Student Notes (.xlsx)",
-                    data=student_notes_to_excel(session),
-                    file_name=f"synth_{safe_lbl}_student_notes.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"synth_dl_notes_{safe_lbl}",
+                    "Download All Sessions (.zip)",
+                    data=all_sessions_to_zip(sessions),
+                    file_name=f"synth_{gen_type_id}_all_sessions.zip",
+                    mime="application/zip",
+                    key=f"synth_dl_all_{gen_idx}",
                 )
 
-            # --- Faculty scores preview ---
-            with st.expander("Faculty Scores", expanded=True):
-                score_rows = []
-                for sid in sorted(session.faculty_scores.keys()):
-                    row = {"Student": sid}
-                    for sec in session.sections:
-                        display = meta["sections"][sec][0]
-                        row[display] = session.faculty_scores[sid].get(sec, "")
-                    score_rows.append(row)
-                st.dataframe(
-                    pd.DataFrame(score_rows),
-                    use_container_width=True,
-                    hide_index=True,
+            # --- Feed into Gold Standard ---
+            st.divider()
+            st.caption("Load these sessions into Gold Standard for analysis.")
+            if st.button(
+                "Load into Gold Standard",
+                key=f"synth_to_gs_{gen_idx}",
+            ):
+                from gold_standard import SessionData
+                gs_sessions = []
+                for session in sessions:
+                    gs_sessions.append(SessionData(
+                        label=session.label,
+                        assessment_type_id=session.assessment_type_id,
+                        sections=session.sections,
+                        scores=session.faculty_scores,
+                        student_count=len(session.faculty_scores),
+                    ))
+                st.session_state["gs_sessions"] = gs_sessions
+                st.session_state["gs_type_id"] = gen_type_id
+                st.success(
+                    f"Loaded {len(gs_sessions)} synthetic sessions into Gold Standard. "
+                    "Switch to the Gold Standard tab to view analysis."
                 )
-                st.download_button(
-                    "Download Faculty Scores (.xlsx)",
-                    data=faculty_scores_to_excel(session),
-                    file_name=f"synth_{safe_lbl}_faculty_scores.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"synth_dl_scores_{safe_lbl}",
-                )
-
-            # --- Student personas ---
-            with st.expander("Student Personas", expanded=False):
-                for student in session.students:
-                    st.markdown(
-                        f"**Student {student.student_id}**  \n"
-                        f"Background: {student.background}  \n"
-                        f"Level: {student.academic_level}  \n"
-                        f"Style: {student.writing_style}  \n"
-                        f"Strengths: {', '.join(student.clinical_strengths)}  \n"
-                        f"Weaknesses: {', '.join(student.clinical_weaknesses)}"
-                    )
-                    st.divider()
-
-            # --- Full session download ---
-            st.download_button(
-                f"Download Full Session ({session.label}) as ZIP",
-                data=session_to_zip(session),
-                file_name=f"synth_{safe_lbl}_complete.zip",
-                mime="application/zip",
-                key=f"synth_dl_full_{safe_lbl}",
-            )
-
-    # --- Download all ---
-    st.divider()
-    if len(sessions) > 1:
-        st.download_button(
-            "Download All Sessions (.zip)",
-            data=all_sessions_to_zip(sessions),
-            file_name=f"synth_{synth_type_id}_all_sessions.zip",
-            mime="application/zip",
-            key="synth_dl_all",
-        )
-
-    # --- Feed into Gold Standard ---
-    st.divider()
-    st.subheader("Use in Gold Standard Analysis")
-    st.caption(
-        "The generated faculty score files can be loaded directly into the "
-        "Gold Standard tab for consensus analysis and benchmark calibration."
-    )
-    if st.button("Load into Gold Standard", key="synth_to_gs"):
-        from gold_standard import SessionData
-        gs_sessions = []
-        for session in sessions:
-            gs_sessions.append(SessionData(
-                label=session.label,
-                assessment_type_id=session.assessment_type_id,
-                sections=session.sections,
-                scores=session.faculty_scores,
-                student_count=len(session.faculty_scores),
-            ))
-        st.session_state["gs_sessions"] = gs_sessions
-        st.session_state["gs_type_id"] = synth_type_id
-        st.success(
-            f"Loaded {len(gs_sessions)} synthetic sessions into Gold Standard. "
-            "Switch to the Gold Standard tab to view analysis."
-        )
 
 
 # =========================================================================
