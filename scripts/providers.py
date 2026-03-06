@@ -225,8 +225,11 @@ _PROVIDER_FACTORIES = {
 SUPPORTED_PROVIDERS = list(_PROVIDER_FACTORIES.keys())
 
 
-def create_caller(provider: str) -> LLMCaller:
+def create_caller(provider: str, model: Optional[str] = None) -> LLMCaller:
     """Create and return an LLM caller for the given provider.
+
+    If *model* is supplied it overrides ``config.MODEL`` so that the
+    returned caller uses the requested model.
 
     The returned callable has signature::
 
@@ -238,6 +241,9 @@ def create_caller(provider: str) -> LLMCaller:
             provider, ", ".join(SUPPORTED_PROVIDERS),
         )
         raise SystemExit(1)
+
+    if model is not None:
+        config.MODEL = model
 
     api_key = get_api_key(provider)
     return _PROVIDER_FACTORIES[provider](api_key)
