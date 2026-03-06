@@ -20,13 +20,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from assessment_types.kpsom_osce import (
     KPSOMHandoffType,
-    KPSOMDocumentationType,
     derive_milestone,
     _extract_float_score,
     _extract_int_score,
     _load_responses,
     _load_faculty_scores,
 )
+from assessment_types.kpsom_documentation import KPSOMDocumentationType
 from assessment_types.base import GradingResult
 
 
@@ -292,9 +292,10 @@ class TestBuildOutputDf:
         df = at.build_output_df([result])
 
         assert "hpi_ai_score" in df.columns
-        assert "social_history_ai_score" in df.columns
-        assert "written_communication_ai_score" in df.columns
+        assert "social_hx_ai_score" in df.columns
         assert "ai_total" in df.columns
+        assert "ai_pcig_total" in df.columns
+        assert "ai_pcdp_total" in df.columns
 
 
 # ---------------------------------------------------------------------------
@@ -316,9 +317,9 @@ class TestAssessmentTypeInterface:
         at = KPSOMDocumentationType()
         sections = at.get_sections()
         assert "hpi" in sections
-        assert "social_history" in sections
-        assert "written_communication" in sections
-        assert len(sections) == 6
+        assert "social_hx" in sections
+        assert "summary_statement" in sections
+        assert len(sections) == 5
 
     def test_handoff_required_files(self):
         at = KPSOMHandoffType()
@@ -343,3 +344,9 @@ class TestAssessmentTypeInterface:
         text = "Good clinical reasoning demonstrated.\n4"
         explanation, score = at.parse_llm_response(text, "hpi")
         assert score == 4.0
+
+    def test_documentation_parse_clamps_score(self):
+        at = KPSOMDocumentationType()
+        text = "Excellent work.\n7"
+        explanation, score = at.parse_llm_response(text, "hpi")
+        assert score == 5.0  # clamped to max_score
