@@ -360,6 +360,244 @@ def _save_results(df: pd.DataFrame, output_file: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Generic assessment processing loop
+# ---------------------------------------------------------------------------
+
+def process_assessment(
+    assessment_type,
+    caller: LLMCaller,
+    file_paths: dict,
+    output_file: str,
+    temperature: float,
+    top_p: float,
+    max_workers: int = 4,
+    progress_callback=None,
+) -> pd.DataFrame:
+    """Grade student responses using any AssessmentType implementation.
+
+    This is the generic grading loop that works with the AssessmentType
+    abstraction.  It does not modify any existing UK-specific code paths.
+
+    Args:
+        assessment_type: An AssessmentType instance.
+        caller: An LLMCaller for making LLM API calls.
+        file_paths: Dict of file paths (keys depend on assessment type).
+        output_file: Path to write the results Excel file.
+        temperature: LLM temperature parameter.
+        top_p: LLM top-p parameter.
+        max_workers: Number of sections to grade in parallel per student.
+        progress_callback: Optional callable(current, total) for progress.
+
+    Returns:
+        The results DataFrame.
+    """
+    from assessment_types.base import GradingResult
+    from assessment_types.kpsom_osce import parse_rubric_with_llm, KPSOMBaseType
+
+    log_file = os.path.splitext(output_file)[0] + ".log"
+    sections = assessment_type.get_sections()
+
+    # --- Load inputs ---
+    df, rubric_data = assessment_type.load_inputs(**file_paths)
+
+    # --- Parse rubric via LLM for KPSOM types ---
+    if isinstance(assessment_type, KPSOMBaseType) and rubric_data.get("rubric_path"):
+        logger.info("Parsing rubric with LLM (one-time)...")
+        parsed_rubric = parse_rubric_with_llm(
+            rubric_data["rubric_path"],
+            caller,
+            assessment_type._rubric_task_type,
+        )
+        rubric_data["parsed_rubric"] = parsed_rubric
+        logger.info("Rubric parsed. Sections found: %s", list(parsed_rubric.keys()))
+
+    # --- Faculty scores lookup ---
+    faculty_df = rubric_data.get("faculty_scores")
+    faculty_lookup = {}
+    if faculty_df is not None:
+        # Find student ID column
+        student_col = None
+        for col in faculty_df.columns:
+            if col.lower().strip() in ("student", "student id"):
+                student_col = col
+                break
+        if student_col:
+            for _, frow in faculty_df.iterrows():
+                sid = frow[student_col]
+                faculty_lookup[sid] = frow
+
+    # --- Resume support ---
+    if os.path.isfile(output_file):
+        try:
+            existing_df = pd.read_excel(output_file)
+            # Check if it looks like a results file for this assessment type
+            score_cols = [f"{s}_ai_score" for s in sections]
+            if all(c in existing_df.columns for c in score_cols):
+                logger.info("Found existing results file for resume check.")
+        except Exception:
+            pass
+
+    total_rows = len(df)
+    if total_rows == 0:
+        logger.warning("No student data rows found. Nothing to grade.")
+        return pd.DataFrame()
+
+    effective_workers = min(max_workers, len(sections))
+    results: list[GradingResult] = []
+
+    # --- Find student ID column ---
+    student_col = None
+    for col in df.columns:
+        if col.lower().strip() in ("student", "student id"):
+            student_col = col
+            break
+
+    for idx, row in df.iterrows():
+        current = len(results)
+        if progress_callback:
+            progress_callback(current, total_rows)
+
+        # Determine student ID
+        if student_col and pd.notna(row.get(student_col)):
+            student_id = str(row[student_col])
+        else:
+            student_id = str(idx)
+
+        logger.info("Processing student %s (%d/%d)...", student_id, current + 1, total_rows)
+
+        section_scores: dict[str, float | None] = {}
+        section_explanations: dict[str, str] = {}
+
+        # Collect gradable sections
+        gradable: list[tuple[str, str]] = []
+        for section in sections:
+            content = row.get(section)
+            if pd.notna(content) and str(content).strip():
+                gradable.append((section, str(content)))
+            else:
+                section_scores[section] = None
+                section_explanations[section] = ""
+
+        def _grade_one(sec: str, content: str) -> tuple[str, str, float | None]:
+            system_prompt = assessment_type.build_grading_prompt(sec, rubric_data)
+            user_msg = assessment_type.build_user_message(sec, content, rubric_data)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ]
+            response = call_llm(caller, messages, temperature, top_p)
+            log_interaction(log_file, messages, response)
+            explanation, score = assessment_type.parse_llm_response(response, sec)
+            return sec, explanation, score
+
+        if effective_workers <= 1 or len(gradable) <= 1:
+            for section, content in gradable:
+                sec, explanation, score = _grade_one(section, content)
+                section_scores[sec] = score
+                section_explanations[sec] = explanation
+        else:
+            futures = {}
+            with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+                for section, content in gradable:
+                    future = pool.submit(_grade_one, section, content)
+                    futures[section] = future
+            for section, future in futures.items():
+                sec, explanation, score = future.result()
+                section_scores[sec] = score
+                section_explanations[sec] = explanation
+
+        # Compute total
+        scored_values = [v for v in section_scores.values() if v is not None]
+        total_score = sum(scored_values) if scored_values else None
+
+        # Milestone derivation (for handoff type)
+        milestone = None
+        if hasattr(assessment_type, '_derive_milestone_for_result'):
+            result_tmp = GradingResult(
+                student_id=student_id,
+                section_scores=section_scores,
+                total_score=total_score,
+            )
+            milestone = assessment_type._derive_milestone_for_result(result_tmp)
+
+        # Faculty scores
+        fac_scores = None
+        try:
+            sid_int = int(float(student_id))
+        except (ValueError, TypeError):
+            sid_int = None
+
+        if sid_int is not None and sid_int in faculty_lookup:
+            frow = faculty_lookup[sid_int]
+            fac_scores = {}
+            for sec in sections:
+                # Try to find a matching column in faculty data
+                fac_val = frow.get(sec)
+                if fac_val is not None and pd.notna(fac_val):
+                    try:
+                        fac_scores[sec] = float(fac_val)
+                    except (ValueError, TypeError):
+                        fac_scores[sec] = 0.0
+                else:
+                    fac_scores[sec] = 0.0
+
+            # Total and milestone from faculty
+            total_col = None
+            for col in faculty_lookup[sid_int].index:
+                if col.lower().strip() == "total":
+                    total_col = col
+                    break
+            if total_col and pd.notna(frow.get(total_col)):
+                try:
+                    fac_scores["total"] = float(frow[total_col])
+                except (ValueError, TypeError):
+                    fac_scores["total"] = None
+            else:
+                fac_scores["total"] = None
+
+            milestone_col = None
+            for col in faculty_lookup[sid_int].index:
+                if col.lower().strip() == "milestone":
+                    milestone_col = col
+                    break
+            if milestone_col and pd.notna(frow.get(milestone_col)):
+                fac_scores["milestone"] = str(frow[milestone_col])
+
+            comments_col = None
+            for col in faculty_lookup[sid_int].index:
+                if col.lower().strip() == "comments":
+                    comments_col = col
+                    break
+            if comments_col and pd.notna(frow.get(comments_col)):
+                fac_scores["comments"] = str(frow[comments_col])
+
+        result = GradingResult(
+            student_id=student_id,
+            section_scores=section_scores,
+            section_explanations=section_explanations,
+            total_score=total_score,
+            milestone=milestone,
+            faculty_scores=fac_scores,
+        )
+        results.append(result)
+
+        # Intermediate save
+        out_df = assessment_type.build_output_df(results)
+        _save_results(out_df, output_file)
+
+    if progress_callback:
+        progress_callback(total_rows, total_rows)
+
+    out_df = assessment_type.build_output_df(results)
+    _save_results(out_df, output_file)
+    logger.info(
+        "Grading completed. Results saved to %s. Log saved to %s.",
+        output_file, log_file,
+    )
+    return out_df
+
+
+# ---------------------------------------------------------------------------
 # Main processing loop
 # ---------------------------------------------------------------------------
 
