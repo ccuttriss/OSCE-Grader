@@ -57,6 +57,17 @@ from gold_standard import (
     BiasAnalysisResult,
     ConsensusResult,
 )
+from synthetic_generator import (
+    generate_synthetic_session,
+    rubric_to_display_text,
+    rubric_to_excel,
+    answer_key_to_excel,
+    student_notes_to_excel,
+    faculty_scores_to_excel,
+    session_to_zip,
+    all_sessions_to_zip,
+    _TYPE_META as SYNTH_TYPE_META,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -1649,17 +1660,406 @@ def tab_gold_standard():
 
 
 # =========================================================================
+# Tab 6 — Synthetic Data Generator
+# =========================================================================
+
+
+def tab_synthetic_generator():
+    st.header("Synthetic Data Generator")
+    st.markdown(
+        "Generate realistic, end-to-end OSCE test data using independent LLM agents. "
+        "Each **student** has a unique persona (background, academic level, writing style) "
+        "and each **faculty rater** has a unique scoring profile. Optionally upload "
+        "de-identified examples to ground the generation in your real data."
+    )
+
+    # --- Assessment type ---
+    synth_type_options = {
+        "kpsom_ipass": "KPSOM — I-PASS Handoff",
+        "kpsom_documentation": "KPSOM — Clinical Documentation",
+        "kpsom_ethics": "KPSOM — Ethics Open-Ended Questions",
+        "uk_osce": "Standard OSCE (HPI / PEX / SUM / DDX / Plan)",
+    }
+    synth_type_id = st.selectbox(
+        "Assessment type",
+        list(synth_type_options.keys()),
+        format_func=lambda k: synth_type_options[k],
+        key="synth_type_select",
+    )
+
+    # --- Generation parameters ---
+    st.subheader("Generation Parameters")
+    pcol1, pcol2, pcol3 = st.columns(3)
+    with pcol1:
+        synth_n_sessions = st.slider(
+            "Number of sessions (years)",
+            min_value=1,
+            max_value=5,
+            value=2,
+            key="synth_n_sessions",
+            help="Each session gets a unique faculty rater persona.",
+        )
+    with pcol2:
+        synth_n_students = st.slider(
+            "Students per session",
+            min_value=2,
+            max_value=15,
+            value=5,
+            key="synth_n_students",
+            help="Each student gets a unique persona with diverse background.",
+        )
+    with pcol3:
+        synth_variability = st.slider(
+            "Variability",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.5,
+            step=0.05,
+            key="synth_variability",
+            help=(
+                "**Low (0.0)**: Mostly moderate raters, tighter score ranges. "
+                "**Medium (0.5)**: Realistic mix of lenient/moderate/strict raters. "
+                "**High (1.0)**: Extreme rater differences, wide score spreads."
+            ),
+        )
+
+    # --- Optional: upload de-identified examples ---
+    st.subheader("Ground in Real Examples (optional)")
+    st.caption(
+        "Upload de-identified files from a real administration. The generator will "
+        "use these as templates for format, tone, and detail level — but generates "
+        "entirely new clinical content."
+    )
+
+    excol1, excol2, excol3 = st.columns(3)
+    with excol1:
+        example_rubric_file = st.file_uploader(
+            "Example rubric (.docx or .xlsx)",
+            type=["docx", "xlsx"],
+            key="synth_example_rubric",
+        )
+    with excol2:
+        example_notes_file = st.file_uploader(
+            "Example student notes (.xlsx)",
+            type=["xlsx"],
+            key="synth_example_notes",
+        )
+    with excol3:
+        example_scores_file = st.file_uploader(
+            "Example faculty scores (.xlsx)",
+            type=["xlsx"],
+            key="synth_example_scores",
+        )
+
+    # --- Model selection ---
+    st.subheader("LLM Configuration")
+    synth_model_options = {
+        "gemini-2.5-flash": ("Google", "google"),
+        "gemini-2.5-pro": ("Google", "google"),
+        "gpt-4o": ("OpenAI", "openai"),
+        "gpt-4o-mini": ("OpenAI", "openai"),
+        "claude-sonnet-4-6": ("Anthropic", "anthropic"),
+        "claude-haiku-4-5": ("Anthropic", "anthropic"),
+    }
+    synth_model = st.radio(
+        "Model",
+        list(synth_model_options.keys()),
+        format_func=lambda k: f"{k} ({synth_model_options[k][0]})",
+        horizontal=True,
+        key="synth_model",
+    )
+    synth_provider = synth_model_options[synth_model][1]
+
+    # API key
+    synth_env_var = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "google": "GOOGLE_API_KEY",
+    }[synth_provider]
+    synth_has_key = bool(os.environ.get(synth_env_var))
+
+    if not synth_has_key:
+        synth_api_key = st.text_input(
+            f"{synth_provider.title()} API Key",
+            type="password",
+            key="synth_api_key",
+        )
+    else:
+        synth_api_key = None
+        st.success(f"{synth_env_var} detected in environment.")
+
+    synth_temperature = st.slider(
+        "Base temperature",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.7,
+        step=0.1,
+        key="synth_temperature",
+        help="Base creativity level. Variability further scales this.",
+    )
+
+    # --- Generate ---
+    st.divider()
+    total_calls = synth_n_sessions * (synth_n_students + 2)
+    st.caption(
+        f"This will make approximately **{total_calls} LLM calls** "
+        f"({synth_n_sessions} sessions × ({synth_n_students} students + rubric + scoring))."
+    )
+
+    if st.button("Generate Synthetic Data", type="primary", key="synth_generate"):
+        if not synth_has_key and not synth_api_key:
+            st.error("Please provide an API key.")
+            return
+
+        if synth_api_key and not synth_has_key:
+            os.environ[synth_env_var] = synth_api_key
+
+        # Load example files if provided
+        example_rubric_text = None
+        example_notes = None
+        example_scores = None
+
+        if example_rubric_file:
+            path = _save_upload(example_rubric_file)
+            if example_rubric_file.name.endswith(".docx"):
+                example_rubric_text = convert_docx_to_text(path)
+            else:
+                df = pd.read_excel(path)
+                example_rubric_text = df.to_string()
+
+        if example_notes_file:
+            path = _save_upload(example_notes_file)
+            df = pd.read_excel(path)
+            if len(df) > 0:
+                example_notes = {
+                    col: str(df[col].iloc[0])
+                    for col in df.columns
+                    if pd.notna(df[col].iloc[0])
+                }
+
+        if example_scores_file:
+            path = _save_upload(example_scores_file)
+            try:
+                from gold_standard import load_faculty_session
+                loaded = load_faculty_session(path, synth_type_id, "example")
+                example_scores = loaded.scores
+            except Exception:
+                st.warning("Could not parse example scores file. Proceeding without.")
+
+        # Create LLM caller
+        import config as _cfg
+        _cfg.MODEL = synth_model
+        _cfg.PROVIDER = synth_provider
+        caller = create_caller(synth_provider, synth_model)
+
+        sessions = []
+        progress_bar = st.progress(0, text="Starting generation...")
+        status_text = st.empty()
+
+        for s_idx in range(synth_n_sessions):
+            def progress_cb(step_name, current, total, _s=s_idx):
+                overall = (_s * (synth_n_students + 2) + current) / total_calls
+                progress_bar.progress(
+                    min(overall, 1.0),
+                    text=f"Session {_s + 1}/{synth_n_sessions}: {step_name}",
+                )
+
+            try:
+                session = generate_synthetic_session(
+                    type_id=synth_type_id,
+                    session_index=s_idx,
+                    n_students=synth_n_students,
+                    variability=synth_variability,
+                    llm_caller=caller,
+                    temperature=synth_temperature,
+                    example_rubric_text=example_rubric_text,
+                    example_notes=example_notes,
+                    example_scores=example_scores,
+                    seed=42 + s_idx,
+                    progress_callback=progress_cb,
+                )
+                sessions.append(session)
+            except Exception as exc:
+                st.error(f"Session {s_idx + 1} generation failed: {exc}")
+                logger.exception("Synthetic generation failed")
+                break
+
+        progress_bar.progress(1.0, text="Complete!")
+        if sessions:
+            st.session_state["synth_sessions"] = sessions
+            st.session_state["synth_type_id"] = synth_type_id
+
+    # --- Display results ---
+    if "synth_sessions" not in st.session_state:
+        return
+
+    sessions = st.session_state["synth_sessions"]
+    synth_type_id = st.session_state["synth_type_id"]
+    meta = SYNTH_TYPE_META[synth_type_id]
+
+    st.divider()
+    st.subheader("Generated Synthetic Data")
+
+    session_tabs = st.tabs([s.label for s in sessions])
+
+    for tab, session in zip(session_tabs, sessions):
+        with tab:
+            # --- Faculty persona ---
+            with st.expander(f"Faculty Rater: {session.faculty.name}", expanded=False):
+                st.markdown(
+                    f"**Specialty:** {session.faculty.specialty}  \n"
+                    f"**Experience:** {session.faculty.years_experience} years  \n"
+                    f"**Scoring tendency:** {session.faculty.scoring_tendency} — "
+                    f"{session.faculty.background_note}  \n"
+                    f"**Focus areas:** {', '.join(session.faculty.focus_areas)}"
+                )
+
+            # --- Rubric ---
+            with st.expander("Rubric", expanded=False):
+                st.markdown(rubric_to_display_text(session.rubric))
+                rcol1, rcol2 = st.columns(2)
+                safe_lbl = session.label.replace(" ", "_")
+                with rcol1:
+                    st.download_button(
+                        "Download Rubric (.xlsx)",
+                        data=rubric_to_excel(session.rubric, synth_type_id),
+                        file_name=f"synth_{safe_lbl}_rubric.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"synth_dl_rubric_{safe_lbl}",
+                    )
+                if synth_type_id == "uk_osce":
+                    with rcol2:
+                        st.download_button(
+                            "Download Answer Key (.xlsx)",
+                            data=answer_key_to_excel(session.rubric, synth_type_id),
+                            file_name=f"synth_{safe_lbl}_answer_key.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"synth_dl_ak_{safe_lbl}",
+                        )
+
+            # --- Student notes preview ---
+            with st.expander("Student Notes", expanded=True):
+                notes_rows = []
+                for sid in sorted(session.student_notes.keys()):
+                    student = next(
+                        (s for s in session.students if s.student_id == sid), None
+                    )
+                    row = {"Student": sid}
+                    if student:
+                        row["Level"] = student.academic_level.split("—")[0].strip()
+                    for sec in session.sections:
+                        display = meta["sections"][sec][0]
+                        text = session.student_notes[sid].get(sec, "")
+                        # Truncate for preview
+                        row[display] = (text[:120] + "...") if len(text) > 120 else text
+                    notes_rows.append(row)
+                st.dataframe(
+                    pd.DataFrame(notes_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.download_button(
+                    "Download Student Notes (.xlsx)",
+                    data=student_notes_to_excel(session),
+                    file_name=f"synth_{safe_lbl}_student_notes.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"synth_dl_notes_{safe_lbl}",
+                )
+
+            # --- Faculty scores preview ---
+            with st.expander("Faculty Scores", expanded=True):
+                score_rows = []
+                for sid in sorted(session.faculty_scores.keys()):
+                    row = {"Student": sid}
+                    for sec in session.sections:
+                        display = meta["sections"][sec][0]
+                        row[display] = session.faculty_scores[sid].get(sec, "")
+                    score_rows.append(row)
+                st.dataframe(
+                    pd.DataFrame(score_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.download_button(
+                    "Download Faculty Scores (.xlsx)",
+                    data=faculty_scores_to_excel(session),
+                    file_name=f"synth_{safe_lbl}_faculty_scores.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"synth_dl_scores_{safe_lbl}",
+                )
+
+            # --- Student personas ---
+            with st.expander("Student Personas", expanded=False):
+                for student in session.students:
+                    st.markdown(
+                        f"**Student {student.student_id}**  \n"
+                        f"Background: {student.background}  \n"
+                        f"Level: {student.academic_level}  \n"
+                        f"Style: {student.writing_style}  \n"
+                        f"Strengths: {', '.join(student.clinical_strengths)}  \n"
+                        f"Weaknesses: {', '.join(student.clinical_weaknesses)}"
+                    )
+                    st.divider()
+
+            # --- Full session download ---
+            st.download_button(
+                f"Download Full Session ({session.label}) as ZIP",
+                data=session_to_zip(session),
+                file_name=f"synth_{safe_lbl}_complete.zip",
+                mime="application/zip",
+                key=f"synth_dl_full_{safe_lbl}",
+            )
+
+    # --- Download all ---
+    st.divider()
+    if len(sessions) > 1:
+        st.download_button(
+            "Download All Sessions (.zip)",
+            data=all_sessions_to_zip(sessions),
+            file_name=f"synth_{synth_type_id}_all_sessions.zip",
+            mime="application/zip",
+            key="synth_dl_all",
+        )
+
+    # --- Feed into Gold Standard ---
+    st.divider()
+    st.subheader("Use in Gold Standard Analysis")
+    st.caption(
+        "The generated faculty score files can be loaded directly into the "
+        "Gold Standard tab for consensus analysis and benchmark calibration."
+    )
+    if st.button("Load into Gold Standard", key="synth_to_gs"):
+        from gold_standard import SessionData
+        gs_sessions = []
+        for session in sessions:
+            gs_sessions.append(SessionData(
+                label=session.label,
+                assessment_type_id=session.assessment_type_id,
+                sections=session.sections,
+                scores=session.faculty_scores,
+                student_count=len(session.faculty_scores),
+            ))
+        st.session_state["gs_sessions"] = gs_sessions
+        st.session_state["gs_type_id"] = synth_type_id
+        st.success(
+            f"Loaded {len(gs_sessions)} synthetic sessions into Gold Standard. "
+            "Switch to the Gold Standard tab to view analysis."
+        )
+
+
+# =========================================================================
 # Main app layout
 # =========================================================================
 st.title("OSCE Grader")
 st.caption("AI-powered grading for medical student post-encounter notes")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Grade Notes",
     "Analysis Dashboard",
     "Flagged Items",
     "Convert Rubric",
     "Gold Standard",
+    "Synthetic Data",
 ])
 
 with tab1:
@@ -1676,3 +2076,6 @@ with tab4:
 
 with tab5:
     tab_gold_standard()
+
+with tab6:
+    tab_synthetic_generator()
