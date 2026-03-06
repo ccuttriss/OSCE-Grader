@@ -45,12 +45,14 @@ from gold_standard import (
     load_faculty_session,
     validate_sessions,
     compute_cross_session_stats,
+    compute_consensus_analysis,
     build_bias_prompt,
     parse_bias_response,
     generate_benchmark_excel,
     generate_benchmark_json,
     GoldStandardBenchmark,
     BiasAnalysisResult,
+    ConsensusResult,
 )
 
 # ---------------------------------------------------------------------------
@@ -1225,6 +1227,102 @@ def tab_gold_standard():
         if drift_rows:
             st.dataframe(pd.DataFrame(drift_rows), use_container_width=True, hide_index=True)
 
+    # --- Cultural Consensus Analysis ---
+    st.divider()
+    st.subheader("Cultural Consensus Analysis")
+    st.caption(
+        "Uses Cultural Consensus Theory (Romney, Weller, Batchelder 1986) "
+        "to estimate session competence and a consensus-weighted answer key."
+    )
+
+    consensus = None
+    if stats.session_count >= 2:
+        try:
+            consensus = compute_consensus_analysis(sessions, stats)
+            st.session_state["gs_consensus"] = consensus
+        except Exception as exc:
+            st.warning(f"Consensus analysis could not be computed: {exc}")
+
+    if consensus:
+        # Model fit metrics
+        fcol1, fcol2, fcol3 = st.columns(3)
+        ratio_display = (
+            f"{consensus.eigenvalue_ratio:.2f}"
+            if consensus.eigenvalue_ratio != float("inf")
+            else "\u221e (perfect)"
+        )
+        fcol1.metric("Eigenvalue Ratio (\u03bb\u2081/\u03bb\u2082)", ratio_display)
+        fcol2.metric("Model Fit", consensus.fit_label)
+        fcol3.metric(
+            "Single Culture",
+            "Yes" if consensus.single_culture_holds else "No",
+        )
+
+        # Interpretation
+        if consensus.eigenvalue_ratio >= 5.0 or consensus.eigenvalue_ratio == float("inf"):
+            st.success(
+                "Strong single-culture fit. Faculty across sessions share a consistent "
+                "scoring standard. The consensus answer key is highly reliable."
+            )
+        elif consensus.eigenvalue_ratio >= 3.0:
+            st.info(
+                "Adequate single-culture fit. Faculty generally share a scoring standard, "
+                "though some variation exists."
+            )
+        else:
+            st.warning(
+                "Weak fit (\u03bb\u2081/\u03bb\u2082 < 3). Multiple scoring cultures may exist. "
+                "The consensus answer key should be interpreted with caution."
+            )
+
+        if consensus.has_negative_loadings:
+            st.warning(
+                "One or more sessions have negative first-factor loadings, "
+                "indicating they may apply a fundamentally different scoring standard."
+            )
+
+        # Eigenvalues table
+        with st.expander("Eigenvalues"):
+            ev_rows = []
+            for i, ev in enumerate(consensus.eigenvalues):
+                ev_rows.append({
+                    "Component": i + 1,
+                    "Eigenvalue": round(ev, 4),
+                    "% Variance": round(
+                        ev / sum(consensus.eigenvalues) * 100, 1
+                    ) if sum(consensus.eigenvalues) > 0 else 0,
+                })
+            st.dataframe(pd.DataFrame(ev_rows), use_container_width=True, hide_index=True)
+
+        # Session competence + first-factor loadings
+        with st.expander("Session Competence & First-Factor Loadings", expanded=True):
+            comp_rows = []
+            for label in consensus.session_competence:
+                loading = consensus.first_factor_loadings[label]
+                comp_rows.append({
+                    "Session": label,
+                    "First-Factor Loading": round(loading, 4),
+                    "Sign": "+" if loading >= 0 else "\u2212 (divergent)",
+                    "Competence Weight": round(
+                        consensus.session_competence[label], 4
+                    ),
+                })
+            st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
+
+        # Consensus answer key
+        with st.expander("Consensus Answer Key", expanded=True):
+            key_rows = []
+            for sec in consensus.consensus_means:
+                div = consensus.divergence[sec]
+                key_rows.append({
+                    "Section": sec,
+                    "Consensus Mean": round(consensus.consensus_means[sec], 3),
+                    "Simple Mean": round(consensus.simple_means[sec], 3),
+                    "Difference": round(div, 3),
+                    "Note": "Divergent" if div > 0.25 else "",
+                })
+            st.dataframe(pd.DataFrame(key_rows), use_container_width=True, hide_index=True)
+
     # --- Step 3: LLM Bias Analysis ---
     st.divider()
     st.subheader("LLM Bias Analysis")
@@ -1330,28 +1428,43 @@ def tab_gold_standard():
 
     benchmark_data = {}
     sections = stats.sections
+    gs_consensus = st.session_state.get("gs_consensus")
 
     for sec in sections:
         ss = stats.section_stats.get(sec)
         with st.expander(f"Section: {sec}", expanded=False):
             if ss:
-                st.markdown(
+                stats_line = (
                     f"**Stats:** mean={ss.mean:.2f}, median={ss.median:.2f}, "
                     f"std={ss.std:.2f}, range=[{ss.min_score:.1f}\u2013{ss.max_score:.1f}]"
                 )
+                if gs_consensus and sec in gs_consensus.consensus_means:
+                    stats_line += (
+                        f" | **Consensus:** {gs_consensus.consensus_means[sec]:.2f}"
+                    )
+                st.markdown(stats_line)
+
+            # Use consensus mean as center if available, else simple mean
+            if gs_consensus and sec in gs_consensus.consensus_means:
+                center = gs_consensus.consensus_means[sec]
+            elif ss:
+                center = ss.mean
+            else:
+                center = 0.0
+            margin = ss.std if ss else 1.0
 
             bcol1, bcol2 = st.columns(2)
             with bcol1:
                 bmin = st.number_input(
                     "Benchmark Min",
-                    value=round(ss.mean - ss.std, 1) if ss else 0.0,
+                    value=round(center - margin, 1),
                     step=0.5,
                     key=f"gs_bmin_{sec}",
                 )
             with bcol2:
                 bmax = st.number_input(
                     "Benchmark Max",
-                    value=round(ss.mean + ss.std, 1) if ss else 5.0,
+                    value=round(center + margin, 1),
                     step=0.5,
                     key=f"gs_bmax_{sec}",
                 )
@@ -1385,6 +1498,7 @@ def tab_gold_standard():
             sections=benchmark_data,
             bias_findings=bias_result,
             stats=stats,
+            consensus=st.session_state.get("gs_consensus"),
             version=1,
         )
 

@@ -12,11 +12,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from gold_standard import (
     BiasAnalysisResult,
+    ConsensusResult,
     CrossSessionStats,
     GoldStandardBenchmark,
     SectionStats,
     SessionData,
     build_bias_prompt,
+    compute_consensus_analysis,
     compute_cross_session_stats,
     generate_benchmark_excel,
     generate_benchmark_json,
@@ -448,3 +450,216 @@ class TestGenerateBenchmark:
         assert set(data["sections"].keys()) == {"hpi", "plan"}
         assert data["bias_findings"]["summary"] == "Minor leniency detected."
         assert len(data["bias_findings"]["recommendations"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Consensus analysis tests
+# ---------------------------------------------------------------------------
+
+
+def _make_sessions_with_means(type_id, means_per_session):
+    """Create SessionData objects whose scores produce desired per-section means.
+
+    means_per_session: dict[label → dict[section → target_mean]]
+    Creates 2 students per session centered on the target mean.
+    """
+    from gold_standard import _SECTION_KEYS
+
+    sections = _SECTION_KEYS[type_id]
+    sessions = []
+    for label, sec_means in means_per_session.items():
+        scores = {}
+        for i, offset in enumerate([-0.25, 0.25]):
+            sid = i + 1
+            student_scores = {}
+            for sec in sections:
+                target = sec_means.get(sec, 3.0)
+                student_scores[sec] = target + offset
+            scores[sid] = student_scores
+        sessions.append(
+            SessionData(
+                label=label,
+                assessment_type_id=type_id,
+                sections=list(sections),
+                scores=scores,
+                student_count=2,
+            )
+        )
+    return sessions
+
+
+class TestConsensusAnalysis:
+    def test_basic_three_sessions(self):
+        sessions = _make_sessions_with_means("kpsom_documentation", {
+            "2023": {"hpi": 3.0, "social_hx": 4.0, "summary_statement": 3.5, "assessment": 4.0, "plan": 3.0, "org_lang": 2.0},
+            "2024": {"hpi": 3.2, "social_hx": 4.1, "summary_statement": 3.6, "assessment": 4.2, "plan": 3.1, "org_lang": 2.1},
+            "2025": {"hpi": 2.0, "social_hx": 2.5, "summary_statement": 2.0, "assessment": 2.5, "plan": 2.0, "org_lang": 1.0},
+        })
+        stats = compute_cross_session_stats(sessions)
+        result = compute_consensus_analysis(sessions, stats)
+
+        # Basic structure checks
+        assert len(result.eigenvalues) == 3
+        assert result.eigenvalue_ratio > 0
+        assert isinstance(result.single_culture_holds, bool)
+        assert len(result.session_competence) == 3
+        assert len(result.first_factor_loadings) == 3
+        assert len(result.consensus_means) == 6  # 6 sections
+
+        # Competence weights sum to ~1
+        assert abs(sum(result.session_competence.values()) - 1.0) < 1e-6
+
+        # Answer key has all sections
+        for sec in ["hpi", "social_hx", "summary_statement", "assessment", "plan", "org_lang"]:
+            assert sec in result.consensus_means
+            assert sec in result.simple_means
+            assert sec in result.divergence
+
+    def test_two_sessions_edge_case(self):
+        sessions = _make_sessions_with_means("kpsom_ethics", {
+            "2023": {"q1_total": 3.0, "q2a_score": 1.5, "q2b_score": 1.0, "q2c_score": 1.5, "q3_total": 6.0},
+            "2024": {"q1_total": 3.5, "q2a_score": 1.8, "q2b_score": 1.2, "q2c_score": 1.6, "q3_total": 6.5},
+        })
+        stats = compute_cross_session_stats(sessions)
+        result = compute_consensus_analysis(sessions, stats)
+
+        assert "2 sessions" in result.fit_label
+        assert len(result.eigenvalues) == 2
+        assert len(result.session_competence) == 2
+
+    def test_perfect_agreement(self):
+        """Three identical sessions should yield equal competence and consensus == simple mean."""
+        means = {"hpi": 3.0, "social_hx": 4.0, "summary_statement": 3.5, "assessment": 4.0, "plan": 3.0, "org_lang": 2.0}
+        sessions = _make_sessions_with_means("kpsom_documentation", {
+            "2023": means,
+            "2024": means,
+            "2025": means,
+        })
+        stats = compute_cross_session_stats(sessions)
+        result = compute_consensus_analysis(sessions, stats)
+
+        # All competence scores should be approximately equal
+        weights = list(result.session_competence.values())
+        assert abs(max(weights) - min(weights)) < 0.01
+
+        # Consensus should equal simple mean (no divergence)
+        for sec in result.consensus_means:
+            assert abs(result.consensus_means[sec] - result.simple_means[sec]) < 0.01
+
+    def test_consensus_differs_from_simple_mean(self):
+        """When 2 sessions agree and 1 diverges, consensus should favor the agreeing pair."""
+        sessions = _make_sessions_with_means("kpsom_documentation", {
+            "2023": {"hpi": 4.0, "social_hx": 4.0, "summary_statement": 4.0, "assessment": 4.0, "plan": 4.0, "org_lang": 3.0},
+            "2024": {"hpi": 4.0, "social_hx": 4.0, "summary_statement": 4.0, "assessment": 4.0, "plan": 4.0, "org_lang": 3.0},
+            "2025": {"hpi": 1.0, "social_hx": 1.0, "summary_statement": 1.0, "assessment": 1.0, "plan": 1.0, "org_lang": 1.0},
+        })
+        stats = compute_cross_session_stats(sessions)
+        result = compute_consensus_analysis(sessions, stats)
+
+        # 2025 should have lower competence than 2023/2024
+        assert result.session_competence["2025"] < result.session_competence["2023"]
+
+        # Consensus mean should be closer to 4.0 than the simple mean of 3.0
+        assert result.consensus_means["hpi"] > result.simple_means["hpi"]
+
+    def test_eigenvalues_are_exposed(self):
+        """Eigenvalues should be available for inspection."""
+        sessions = _make_sessions_with_means("kpsom_documentation", {
+            "2023": {"hpi": 3.0, "social_hx": 4.0, "summary_statement": 3.5, "assessment": 4.0, "plan": 3.0, "org_lang": 2.0},
+            "2024": {"hpi": 3.1, "social_hx": 4.1, "summary_statement": 3.6, "assessment": 4.1, "plan": 3.1, "org_lang": 2.1},
+            "2025": {"hpi": 2.0, "social_hx": 2.5, "summary_statement": 2.0, "assessment": 2.5, "plan": 2.0, "org_lang": 1.0},
+        })
+        stats = compute_cross_session_stats(sessions)
+        result = compute_consensus_analysis(sessions, stats)
+
+        # Eigenvalues should be in descending order
+        for i in range(len(result.eigenvalues) - 1):
+            assert result.eigenvalues[i] >= result.eigenvalues[i + 1]
+
+        # First eigenvalue should be the largest
+        assert result.eigenvalues[0] == max(result.eigenvalues)
+
+        # Ratio should be first / second (unless second is near zero)
+        if abs(result.eigenvalues[1]) > 1e-10:
+            expected_ratio = result.eigenvalues[0] / abs(result.eigenvalues[1])
+            assert abs(result.eigenvalue_ratio - expected_ratio) < 0.01
+        else:
+            assert result.eigenvalue_ratio == float("inf")
+
+    def test_first_factor_loadings_signed(self):
+        """First-factor loadings should be signed (not just absolute values)."""
+        sessions = _make_sessions_with_means("kpsom_documentation", {
+            "2023": {"hpi": 4.0, "social_hx": 4.0, "summary_statement": 4.0, "assessment": 4.0, "plan": 4.0, "org_lang": 3.0},
+            "2024": {"hpi": 4.0, "social_hx": 4.0, "summary_statement": 4.0, "assessment": 4.0, "plan": 4.0, "org_lang": 3.0},
+            "2025": {"hpi": 1.0, "social_hx": 1.0, "summary_statement": 1.0, "assessment": 1.0, "plan": 1.0, "org_lang": 1.0},
+        })
+        stats = compute_cross_session_stats(sessions)
+        result = compute_consensus_analysis(sessions, stats)
+
+        # Loadings should be actual signed floats
+        for label, loading in result.first_factor_loadings.items():
+            assert isinstance(loading, float)
+
+        # The agreeing sessions should have same-sign loadings
+        assert (
+            result.first_factor_loadings["2023"]
+            * result.first_factor_loadings["2024"]
+            > 0
+        ), "Agreeing sessions should have same-sign loadings"
+
+    def test_consensus_in_benchmark_json(self):
+        """Consensus data should appear in the benchmark JSON."""
+        sessions = _make_sessions_with_means("kpsom_documentation", {
+            "2023": {"hpi": 3.0, "social_hx": 4.0, "summary_statement": 3.0, "assessment": 4.0, "plan": 3.0, "org_lang": 2.0},
+            "2024": {"hpi": 3.5, "social_hx": 4.5, "summary_statement": 3.5, "assessment": 4.5, "plan": 3.5, "org_lang": 2.5},
+        })
+        stats = compute_cross_session_stats(sessions)
+        consensus = compute_consensus_analysis(sessions, stats)
+
+        bm = GoldStandardBenchmark(
+            assessment_type_id="kpsom_documentation",
+            created_date="2026-03-06",
+            consensus=consensus,
+        )
+        raw = generate_benchmark_json(bm)
+        data = json.loads(raw)
+
+        assert "consensus" in data
+        c = data["consensus"]
+        assert "eigenvalues" in c
+        assert "eigenvalue_ratio" in c
+        assert "first_factor_loadings" in c
+        assert "session_competence" in c
+        assert "consensus_means" in c
+        assert "simple_means" in c
+        assert "divergence" in c
+        assert "has_negative_loadings" in c
+
+    def test_consensus_in_benchmark_excel(self):
+        """Consensus data should appear as a 4th sheet in the Excel output."""
+        sessions = _make_sessions_with_means("kpsom_documentation", {
+            "2023": {"hpi": 3.0, "social_hx": 4.0, "summary_statement": 3.0, "assessment": 4.0, "plan": 3.0, "org_lang": 2.0},
+            "2024": {"hpi": 3.5, "social_hx": 4.5, "summary_statement": 3.5, "assessment": 4.5, "plan": 3.5, "org_lang": 2.5},
+        })
+        stats = compute_cross_session_stats(sessions)
+        consensus = compute_consensus_analysis(sessions, stats)
+
+        bm = GoldStandardBenchmark(
+            assessment_type_id="kpsom_documentation",
+            created_date="2026-03-06",
+            consensus=consensus,
+        )
+        data = generate_benchmark_excel(bm)
+
+        import io
+        from openpyxl import load_workbook as _load_wb
+        wb = _load_wb(io.BytesIO(data))
+        assert "Consensus Analysis" in wb.sheetnames
+
+        ws = wb["Consensus Analysis"]
+        rows = list(ws.iter_rows(values_only=True))
+        # Check key content
+        texts = [str(cell) for row in rows for cell in row if cell is not None]
+        assert "Eigenvalue Ratio" in texts
+        assert "Consensus Answer Key" in texts
+        assert "First-Factor Loading (signed)" in texts

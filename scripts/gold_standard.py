@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import statistics
 from dataclasses import dataclass, field
 from datetime import date
 
+import numpy as np
 import pandas as pd
 from openpyxl import Workbook, load_workbook
 
@@ -73,6 +75,22 @@ class BiasAnalysisResult:
 
 
 @dataclass
+class ConsensusResult:
+    """Output from Cultural Consensus Theory analysis."""
+
+    eigenvalues: list[float]
+    eigenvalue_ratio: float                    # λ₁/λ₂
+    single_culture_holds: bool                 # True if ratio >= 3.0
+    fit_label: str                             # "Strong" / "Adequate" / "Weak" / etc.
+    session_competence: dict[str, float]       # session_label → normalized weight
+    first_factor_loadings: dict[str, float]    # session_label → signed loading
+    consensus_means: dict[str, float]          # section → competence-weighted mean
+    simple_means: dict[str, float]             # section → unweighted mean
+    divergence: dict[str, float]               # section → |consensus - simple|
+    has_negative_loadings: bool = False
+
+
+@dataclass
 class GoldStandardBenchmark:
     """Complete gold standard artifact ready for export."""
 
@@ -81,6 +99,7 @@ class GoldStandardBenchmark:
     sections: dict[str, dict] = field(default_factory=dict)
     bias_findings: BiasAnalysisResult = field(default_factory=BiasAnalysisResult)
     stats: CrossSessionStats | None = None
+    consensus: ConsensusResult | None = None
     version: int = 1
 
 
@@ -377,6 +396,203 @@ def compute_cross_session_stats(
 
 
 # ---------------------------------------------------------------------------
+# Cultural Consensus Analysis (CCT)
+# ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
+
+
+def _build_session_section_matrix(
+    stats: CrossSessionStats,
+) -> tuple[np.ndarray, list[str], list[str]]:
+    """Build the sessions × sections matrix of per-session mean scores.
+
+    Returns (matrix, session_labels, section_names).
+    """
+    labels = stats.session_labels
+    sections = stats.sections
+
+    matrix = np.zeros((len(labels), len(sections)))
+    for i, label in enumerate(labels):
+        for j, sec in enumerate(sections):
+            ss = stats.section_stats.get(sec)
+            if ss is None:
+                matrix[i, j] = np.nan
+            else:
+                val = ss.per_session_means.get(label)
+                matrix[i, j] = val if val is not None else np.nan
+
+    # Validate — no entirely-missing row or column
+    for i, label in enumerate(labels):
+        if np.all(np.isnan(matrix[i, :])):
+            raise ValueError(
+                f"Session '{label}' has no scores for any section."
+            )
+    for j, sec in enumerate(sections):
+        if np.all(np.isnan(matrix[:, j])):
+            raise ValueError(
+                f"Section '{sec}' has no scores in any session."
+            )
+
+    return matrix, labels, sections
+
+
+def _compute_agreement_matrix(matrix: np.ndarray) -> np.ndarray:
+    """Compute the Pearson correlation matrix across sessions (rows).
+
+    Returns an n_sessions × n_sessions correlation matrix.
+    """
+    # Z-score each column (section) to normalize across different scales
+    col_means = np.nanmean(matrix, axis=0)
+    col_stds = np.nanstd(matrix, axis=0, ddof=0)
+    # Avoid division by zero for constant columns
+    col_stds[col_stds < 1e-10] = 1.0
+    standardized = (matrix - col_means) / col_stds
+
+    # Replace any remaining NaN with 0 (neutral contribution)
+    standardized = np.nan_to_num(standardized, nan=0.0)
+
+    # Check for degenerate case: if all rows are identical (perfect agreement),
+    # corrcoef will produce NaN. Detect this and return all-ones matrix.
+    row_stds = np.std(standardized, axis=1)
+    if np.all(row_stds < 1e-10):
+        n = standardized.shape[0]
+        return np.ones((n, n))
+
+    # Compute correlation of rows (sessions) across columns (sections)
+    agreement = np.corrcoef(standardized)
+
+    # Handle NaN from constant rows (session with zero variance after z-scoring)
+    agreement = np.nan_to_num(agreement, nan=0.0)
+
+    return agreement
+
+
+def _eigendecompose(
+    agreement: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Eigendecompose the agreement matrix.
+
+    Returns (eigenvalues_descending, eigenvectors_corresponding).
+    Eigenvectors are columns of the returned matrix.
+    """
+    eigenvalues, eigenvectors = np.linalg.eigh(agreement)
+    # eigh returns ascending order — reverse to descending
+    idx = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
+    return eigenvalues, eigenvectors
+
+
+def compute_consensus_analysis(
+    sessions: list[SessionData],
+    stats: CrossSessionStats,
+) -> ConsensusResult:
+    """Run Cultural Consensus Theory analysis on cross-session data.
+
+    Treats each session as an "informant" and each section as an "item".
+    Uses the informal model (Pearson correlations + eigendecomposition)
+    to estimate session competence and a consensus-weighted answer key.
+    """
+    if len(sessions) < 2:
+        raise ValueError("At least 2 sessions required for consensus analysis.")
+
+    # Step 1: Build the sessions × sections matrix
+    matrix, labels, sections = _build_session_section_matrix(stats)
+    n_sessions = len(labels)
+
+    # Step 2: Compute agreement matrix (correlations across sessions)
+    agreement = _compute_agreement_matrix(matrix)
+
+    # Step 3: Eigendecompose
+    eigenvalues, eigenvectors = _eigendecompose(agreement)
+
+    # Step 4: Eigenvalue ratio and fit assessment
+    lambda1 = float(eigenvalues[0])
+    lambda2 = float(eigenvalues[1]) if n_sessions > 1 else 0.0
+
+    if abs(lambda2) < 1e-10:
+        eigenvalue_ratio = float("inf")
+    else:
+        eigenvalue_ratio = lambda1 / abs(lambda2)
+
+    if n_sessions == 2:
+        fit_label = "N/A (2 sessions)"
+        single_culture_holds = eigenvalue_ratio >= 3.0
+    elif eigenvalue_ratio >= 5.0:
+        fit_label = "Strong"
+        single_culture_holds = True
+    elif eigenvalue_ratio >= 3.0:
+        fit_label = "Adequate"
+        single_culture_holds = True
+    else:
+        fit_label = "Weak"
+        single_culture_holds = False
+
+    # Step 5: First-factor loadings and competence weights
+    first_eigenvector = eigenvectors[:, 0]
+    has_negative = bool(np.any(first_eigenvector < 0))
+
+    # Signed loadings (for display — user wants to see these)
+    first_factor_loadings = {}
+    for i, label in enumerate(labels):
+        first_factor_loadings[label] = float(first_eigenvector[i])
+
+    # Competence weights = |loading| normalized to sum to 1
+    abs_loadings = np.abs(first_eigenvector)
+    total = abs_loadings.sum()
+    if total < 1e-10:
+        # Degenerate — equal weights
+        weights = np.ones(n_sessions) / n_sessions
+    else:
+        weights = abs_loadings / total
+
+    session_competence = {}
+    for i, label in enumerate(labels):
+        session_competence[label] = float(weights[i])
+
+    # Step 6: Consensus answer key (competence-weighted means)
+    # Use the ORIGINAL (unstandardized) per-session means
+    consensus_means = {}
+    simple_means = {}
+    divergence = {}
+
+    for j, sec in enumerate(sections):
+        sec_values = matrix[:, j]  # Original means per session
+        # Weighted mean
+        valid_mask = ~np.isnan(sec_values)
+        if valid_mask.any():
+            valid_vals = sec_values[valid_mask]
+            valid_weights = weights[valid_mask]
+            w_sum = valid_weights.sum()
+            if w_sum > 0:
+                consensus_means[sec] = float(
+                    np.sum(valid_vals * valid_weights) / w_sum
+                )
+            else:
+                consensus_means[sec] = float(np.mean(valid_vals))
+            simple_means[sec] = float(np.mean(valid_vals))
+        else:
+            consensus_means[sec] = 0.0
+            simple_means[sec] = 0.0
+
+        divergence[sec] = abs(consensus_means[sec] - simple_means[sec])
+
+    return ConsensusResult(
+        eigenvalues=[float(v) for v in eigenvalues],
+        eigenvalue_ratio=eigenvalue_ratio,
+        single_culture_holds=single_culture_holds,
+        fit_label=fit_label,
+        session_competence=session_competence,
+        first_factor_loadings=first_factor_loadings,
+        consensus_means=consensus_means,
+        simple_means=simple_means,
+        divergence=divergence,
+        has_negative_loadings=has_negative,
+    )
+
+
+# ---------------------------------------------------------------------------
 # LLM bias analysis
 # ---------------------------------------------------------------------------
 
@@ -645,6 +861,55 @@ def generate_benchmark_excel(benchmark: GoldStandardBenchmark) -> bytes:
                 row.append(round(m, 2) if m is not None else "")
             ws3.append(row)
 
+    # --- Sheet 4: Consensus Analysis ---
+    if benchmark.consensus:
+        ws4 = wb.create_sheet("Consensus Analysis")
+        c = benchmark.consensus
+
+        # Model fit
+        ws4.append(["Cultural Consensus Theory Analysis"])
+        ws4.append([])
+        ws4.append(["Eigenvalue Ratio", round(c.eigenvalue_ratio, 2)])
+        ws4.append(["Model Fit", c.fit_label])
+        ws4.append([
+            "Single Culture",
+            "Yes" if c.single_culture_holds else "No",
+        ])
+        ws4.append([
+            "Negative Loadings",
+            "Yes" if c.has_negative_loadings else "No",
+        ])
+
+        # Eigenvalues
+        ws4.append([])
+        ws4.append(["Eigenvalues"])
+        ws4.append(["Index", "Value"])
+        for i, ev in enumerate(c.eigenvalues):
+            ws4.append([i + 1, round(ev, 4)])
+
+        # Session competence
+        ws4.append([])
+        ws4.append(["Session Competence Scores"])
+        ws4.append(["Session", "First-Factor Loading (signed)", "Weight (normalized)"])
+        for label in c.session_competence:
+            ws4.append([
+                label,
+                round(c.first_factor_loadings[label], 4),
+                round(c.session_competence[label], 4),
+            ])
+
+        # Consensus answer key
+        ws4.append([])
+        ws4.append(["Consensus Answer Key"])
+        ws4.append(["Section", "Consensus Mean", "Simple Mean", "Difference"])
+        for sec in c.consensus_means:
+            ws4.append([
+                sec,
+                round(c.consensus_means[sec], 3),
+                round(c.simple_means[sec], 3),
+                round(c.divergence[sec], 3),
+            ])
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -687,5 +952,30 @@ def generate_benchmark_json(benchmark: GoldStandardBenchmark) -> str:
                     k: round(v, 3) for k, v in ss.per_session_means.items()
                 },
             }
+
+    if benchmark.consensus:
+        c = benchmark.consensus
+        data["consensus"] = {
+            "eigenvalues": [round(v, 4) for v in c.eigenvalues],
+            "eigenvalue_ratio": round(c.eigenvalue_ratio, 3),
+            "single_culture_holds": c.single_culture_holds,
+            "fit_label": c.fit_label,
+            "has_negative_loadings": c.has_negative_loadings,
+            "first_factor_loadings": {
+                k: round(v, 4) for k, v in c.first_factor_loadings.items()
+            },
+            "session_competence": {
+                k: round(v, 4) for k, v in c.session_competence.items()
+            },
+            "consensus_means": {
+                k: round(v, 3) for k, v in c.consensus_means.items()
+            },
+            "simple_means": {
+                k: round(v, 3) for k, v in c.simple_means.items()
+            },
+            "divergence": {
+                k: round(v, 3) for k, v in c.divergence.items()
+            },
+        }
 
     return json.dumps(data, indent=2)
