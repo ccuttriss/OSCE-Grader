@@ -17,6 +17,7 @@ import io
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -613,7 +614,7 @@ def generate_synthetic_session(
     # --- Step 3: Generate student personas ---
     students = _generate_student_personas(n_students, rng)
 
-    # --- Step 4: Generate student notes ---
+    # --- Step 4: Generate student notes (parallel) ---
     student_notes: dict[int, dict[str, str]] = {}
     # Pick one example student's scores for calibration reference if available
     example_score_ref = None
@@ -621,25 +622,20 @@ def generate_synthetic_session(
         first_key = next(iter(example_scores))
         example_score_ref = example_scores[first_key]
 
-    for i, student in enumerate(students):
-        if progress_callback:
-            progress_callback(
-                f"Student {student.student_id} writing notes",
-                i + 1,
-                n_students + 2,
-            )
+    if progress_callback:
+        progress_callback("Generating student notes (parallel)", 1, n_students + 2)
 
+    def _generate_one_note(student: StudentPersona) -> tuple[int, dict[str, str]]:
         note_messages = _build_student_note_prompt(
             type_id, rubric, student, example_notes
         )
         note_response = llm_caller(note_messages, eff_temp, 1.0)
         try:
             notes = _parse_json_response(note_response)
-            # Ensure all sections present
             for sec in sections:
                 if sec not in notes:
                     notes[sec] = ""
-            student_notes[student.student_id] = {
+            return student.student_id, {
                 sec: str(notes.get(sec, "")) for sec in sections
             }
         except ValueError:
@@ -647,18 +643,32 @@ def generate_synthetic_session(
                 "Failed to parse student %d notes, using empty.",
                 student.student_id,
             )
-            student_notes[student.student_id] = {sec: "" for sec in sections}
+            return student.student_id, {sec: "" for sec in sections}
 
-    # --- Step 5: Faculty scores all students ---
+    with ThreadPoolExecutor(max_workers=min(n_students, 8)) as pool:
+        note_futures = {
+            pool.submit(_generate_one_note, student): student
+            for student in students
+        }
+        notes_done = 0
+        for future in as_completed(note_futures):
+            sid, parsed_notes = future.result()
+            student_notes[sid] = parsed_notes
+            notes_done += 1
+            if progress_callback:
+                progress_callback(
+                    f"Student notes ({notes_done}/{n_students})",
+                    notes_done,
+                    n_students + 2,
+                )
+
+    # --- Step 5: Faculty scores all students (parallel) ---
     faculty_scores: dict[int, dict[str, float]] = {}
-    for i, student in enumerate(students):
-        if progress_callback:
-            progress_callback(
-                f"Faculty scoring student {student.student_id}",
-                n_students + 1,
-                n_students + 2,
-            )
 
+    if progress_callback:
+        progress_callback("Scoring students (parallel)", n_students, n_students + 2)
+
+    def _score_one_student(student: StudentPersona) -> tuple[int, dict[str, float]]:
         score_messages = _build_faculty_scoring_prompt(
             type_id,
             rubric,
@@ -680,13 +690,30 @@ def generate_synthetic_session(
                         parsed[sec] = 0.0
                 else:
                     parsed[sec] = 0.0
-            faculty_scores[student.student_id] = parsed
+            return student.student_id, parsed
         except ValueError:
             logger.warning(
                 "Failed to parse faculty scores for student %d, using zeros.",
                 student.student_id,
             )
-            faculty_scores[student.student_id] = {sec: 0.0 for sec in sections}
+            return student.student_id, {sec: 0.0 for sec in sections}
+
+    with ThreadPoolExecutor(max_workers=min(n_students, 8)) as pool:
+        score_futures = {
+            pool.submit(_score_one_student, student): student
+            for student in students
+        }
+        scores_done = 0
+        for future in as_completed(score_futures):
+            sid, parsed_scores = future.result()
+            faculty_scores[sid] = parsed_scores
+            scores_done += 1
+            if progress_callback:
+                progress_callback(
+                    f"Faculty scoring ({scores_done}/{n_students})",
+                    n_students + 1,
+                    n_students + 2,
+                )
 
     label = f"{2020 + session_index} {'Spring' if session_index % 2 == 0 else 'Fall'}"
 
