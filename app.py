@@ -159,6 +159,67 @@ def _save_upload(uploaded_file) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Persistent example file storage per assessment type
+# ---------------------------------------------------------------------------
+EXAMPLES_DIR = os.path.join(REPO_ROOT, "examples")
+
+_EXAMPLE_SLOTS = ("rubric", "student_notes", "faculty_scores")
+
+_EXAMPLE_EXTENSIONS = {
+    "rubric": (".docx", ".xlsx"),
+    "student_notes": (".xlsx",),
+    "faculty_scores": (".xlsx",),
+}
+
+
+def _examples_type_dir(type_id: str) -> str:
+    """Return the persistent examples directory for a given assessment type."""
+    d = os.path.join(EXAMPLES_DIR, type_id)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _save_example(type_id: str, slot: str, uploaded_file) -> str:
+    """Persist an uploaded example file to disk, replacing any previous file in that slot."""
+    d = _examples_type_dir(type_id)
+    # Remove any existing file for this slot
+    _remove_example(type_id, slot)
+    # Save with a prefixed name so we can identify the slot
+    filename = f"{slot}__{uploaded_file.name}"
+    path = os.path.join(d, filename)
+    with open(path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    return path
+
+
+def _get_example_path(type_id: str, slot: str) -> str | None:
+    """Return the path of the currently saved example for a slot, or None."""
+    d = _examples_type_dir(type_id)
+    prefix = f"{slot}__"
+    for fname in os.listdir(d):
+        if fname.startswith(prefix):
+            return os.path.join(d, fname)
+    return None
+
+
+def _get_example_display_name(type_id: str, slot: str) -> str | None:
+    """Return the original filename (without slot prefix) of a saved example."""
+    d = _examples_type_dir(type_id)
+    prefix = f"{slot}__"
+    for fname in os.listdir(d):
+        if fname.startswith(prefix):
+            return fname[len(prefix):]
+    return None
+
+
+def _remove_example(type_id: str, slot: str) -> None:
+    """Delete the saved example file for a slot."""
+    path = _get_example_path(type_id, slot)
+    if path and os.path.exists(path):
+        os.remove(path)
+
+
+# ---------------------------------------------------------------------------
 # Helper: detect section columns from a DataFrame
 # ---------------------------------------------------------------------------
 def _detect_sections(df: pd.DataFrame) -> list[str]:
@@ -1723,33 +1784,45 @@ def tab_synthetic_generator():
             ),
         )
 
-    # --- Optional: upload de-identified examples ---
-    st.subheader("Ground in Real Examples (optional)")
+    # --- Persistent example files per assessment type ---
+    st.subheader("Example Files (persistent per assessment type)")
     st.caption(
-        "Upload de-identified files from a real administration. The generator will "
-        "use these as templates for format, tone, and detail level — but generates "
-        "entirely new clinical content."
+        "Upload de-identified files from a real administration. These are saved to "
+        "disk and persist across restarts and generations. The generator uses them "
+        "as templates for format, tone, and detail level — but generates entirely "
+        "new clinical content."
     )
 
+    _slot_labels = {
+        "rubric": ("Example Rubric", ".docx or .xlsx", ["docx", "xlsx"]),
+        "student_notes": ("Example Student Notes", ".xlsx", ["xlsx"]),
+        "faculty_scores": ("Example Faculty Scores", ".xlsx", ["xlsx"]),
+    }
+
     excol1, excol2, excol3 = st.columns(3)
-    with excol1:
-        example_rubric_file = st.file_uploader(
-            "Example rubric (.docx or .xlsx)",
-            type=["docx", "xlsx"],
-            key="synth_example_rubric",
-        )
-    with excol2:
-        example_notes_file = st.file_uploader(
-            "Example student notes (.xlsx)",
-            type=["xlsx"],
-            key="synth_example_notes",
-        )
-    with excol3:
-        example_scores_file = st.file_uploader(
-            "Example faculty scores (.xlsx)",
-            type=["xlsx"],
-            key="synth_example_scores",
-        )
+    for col, slot in zip([excol1, excol2, excol3], _EXAMPLE_SLOTS):
+        label, ext_hint, ext_list = _slot_labels[slot]
+        with col:
+            saved_name = _get_example_display_name(synth_type_id, slot)
+            if saved_name:
+                st.success(f"**{label}:** {saved_name}", icon="\u2705")
+                if st.button(
+                    f"Remove {label.lower()}",
+                    key=f"synth_rm_{slot}_{synth_type_id}",
+                ):
+                    _remove_example(synth_type_id, slot)
+                    st.rerun()
+            else:
+                st.info(f"**{label}:** None saved", icon="\u2139\ufe0f")
+
+            new_file = st.file_uploader(
+                f"Upload {label.lower()} ({ext_hint})",
+                type=ext_list,
+                key=f"synth_upload_{slot}_{synth_type_id}",
+            )
+            if new_file is not None:
+                _save_example(synth_type_id, slot, new_file)
+                st.rerun()
 
     # --- Model selection ---
     st.subheader("LLM Configuration")
@@ -1814,22 +1887,22 @@ def tab_synthetic_generator():
         if synth_api_key and not synth_has_key:
             os.environ[synth_env_var] = synth_api_key
 
-        # Load example files if provided
+        # Load example files from persistent storage
         example_rubric_text = None
         example_notes = None
         example_scores = None
 
-        if example_rubric_file:
-            path = _save_upload(example_rubric_file)
-            if example_rubric_file.name.endswith(".docx"):
-                example_rubric_text = convert_docx_to_text(path)
+        rubric_path = _get_example_path(synth_type_id, "rubric")
+        if rubric_path:
+            if rubric_path.endswith(".docx"):
+                example_rubric_text = convert_docx_to_text(rubric_path)
             else:
-                df = pd.read_excel(path)
+                df = pd.read_excel(rubric_path)
                 example_rubric_text = df.to_string()
 
-        if example_notes_file:
-            path = _save_upload(example_notes_file)
-            df = pd.read_excel(path)
+        notes_path = _get_example_path(synth_type_id, "student_notes")
+        if notes_path:
+            df = pd.read_excel(notes_path)
             if len(df) > 0:
                 example_notes = {
                     col: str(df[col].iloc[0])
@@ -1837,11 +1910,11 @@ def tab_synthetic_generator():
                     if pd.notna(df[col].iloc[0])
                 }
 
-        if example_scores_file:
-            path = _save_upload(example_scores_file)
+        scores_path = _get_example_path(synth_type_id, "faculty_scores")
+        if scores_path:
             try:
                 from gold_standard import load_faculty_session
-                loaded = load_faculty_session(path, synth_type_id, "example")
+                loaded = load_faculty_session(scores_path, synth_type_id, "example")
                 example_scores = loaded.scores
             except Exception:
                 st.warning("Could not parse example scores file. Proceeding without.")
@@ -1934,12 +2007,15 @@ def tab_synthetic_generator():
         if sessions:
             # Build metadata about which example files grounded this generation
             examples_used = []
-            if example_rubric_file:
-                examples_used.append(f"Rubric: {example_rubric_file.name}")
-            if example_notes_file:
-                examples_used.append(f"Student notes: {example_notes_file.name}")
-            if example_scores_file:
-                examples_used.append(f"Faculty scores: {example_scores_file.name}")
+            rubric_name = _get_example_display_name(synth_type_id, "rubric")
+            notes_name = _get_example_display_name(synth_type_id, "student_notes")
+            scores_name = _get_example_display_name(synth_type_id, "faculty_scores")
+            if rubric_name:
+                examples_used.append(f"Rubric: {rubric_name}")
+            if notes_name:
+                examples_used.append(f"Student notes: {notes_name}")
+            if scores_name:
+                examples_used.append(f"Faculty scores: {scores_name}")
 
             generation_entry = {
                 "sessions": sessions,
