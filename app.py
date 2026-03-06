@@ -1820,7 +1820,7 @@ def tab_synthetic_generator():
                 type=ext_list,
                 key=f"synth_upload_{slot}_{synth_type_id}",
             )
-            if new_file is not None:
+            if new_file is not None and new_file.name != saved_name:
                 _save_example(synth_type_id, slot, new_file)
                 st.rerun()
 
