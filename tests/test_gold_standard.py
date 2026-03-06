@@ -22,6 +22,7 @@ from gold_standard import (
     compute_cross_session_stats,
     generate_benchmark_excel,
     generate_benchmark_json,
+    generate_example_sessions,
     load_faculty_session,
     parse_bias_response,
     validate_sessions,
@@ -663,3 +664,100 @@ class TestConsensusAnalysis:
         assert "Eigenvalue Ratio" in texts
         assert "Consensus Answer Key" in texts
         assert "First-Factor Loading (signed)" in texts
+
+
+# ---------------------------------------------------------------------------
+# Example session generation tests
+# ---------------------------------------------------------------------------
+
+
+class TestExampleSessions:
+    """Tests for the generate_example_sessions() function."""
+
+    def test_generates_correct_count(self):
+        sessions = generate_example_sessions("kpsom_documentation", n_sessions=4, students_per_session=5)
+        assert len(sessions) == 4
+        for s in sessions:
+            assert s.student_count == 5
+            assert len(s.scores) == 5
+
+    def test_all_assessment_types(self):
+        for type_id in ("kpsom_ipass", "kpsom_documentation", "kpsom_ethics", "uk_osce"):
+            sessions = generate_example_sessions(type_id, n_sessions=3, students_per_session=4)
+            assert len(sessions) == 3
+            for s in sessions:
+                assert s.assessment_type_id == type_id
+                assert len(s.sections) > 0
+                for _sid, sdict in s.scores.items():
+                    for sec in s.sections:
+                        assert sec in sdict
+                        assert isinstance(sdict[sec], float)
+
+    def test_sessions_have_distinct_labels(self):
+        sessions = generate_example_sessions("uk_osce", n_sessions=5)
+        labels = [s.label for s in sessions]
+        assert len(set(labels)) == 5
+
+    def test_reproducible_with_seed(self):
+        s1 = generate_example_sessions("kpsom_ipass", seed=99)
+        s2 = generate_example_sessions("kpsom_ipass", seed=99)
+        for a, b in zip(s1, s2):
+            assert a.scores == b.scores
+
+    def test_different_seeds_differ(self):
+        s1 = generate_example_sessions("kpsom_ipass", seed=1)
+        s2 = generate_example_sessions("kpsom_ipass", seed=2)
+        # At least one student score should differ
+        assert s1[0].scores != s2[0].scores
+
+    def test_works_with_consensus_analysis(self):
+        sessions = generate_example_sessions("kpsom_documentation", n_sessions=3)
+        stats = compute_cross_session_stats(sessions)
+        result = compute_consensus_analysis(sessions, stats)
+        assert len(result.eigenvalues) == 3
+        assert sum(result.session_competence.values()) == pytest.approx(1.0, abs=0.01)
+        assert len(result.consensus_means) == len(sessions[0].sections)
+
+    def test_unknown_type_raises(self):
+        with pytest.raises(ValueError, match="Unknown assessment type"):
+            generate_example_sessions("nonexistent_type")
+
+    def test_sessions_vary_across_years(self):
+        """Ensure example sessions aren't all identical (bias offsets work)."""
+        sessions = generate_example_sessions("uk_osce", n_sessions=3, students_per_session=20)
+        stats = compute_cross_session_stats(sessions)
+        # Per-session means should differ for at least one section
+        some_differ = False
+        for sec in stats.sections:
+            means = list(stats.section_stats[sec].per_session_means.values())
+            if len(set(round(m, 2) for m in means)) > 1:
+                some_differ = True
+                break
+        assert some_differ, "Example sessions should have different scoring patterns"
+
+
+class TestJsonInfinityHandling:
+    """Test that JSON serialization handles edge cases."""
+
+    def test_json_with_inf_eigenvalue_ratio(self):
+        """Ensure generate_benchmark_json doesn't crash when eigenvalue_ratio is inf."""
+        sessions = _make_sessions_with_means("kpsom_documentation", {
+            "2023": {"hpi": 3.0, "social_hx": 4.0, "summary_statement": 3.0, "assessment": 4.0, "plan": 3.0, "org_lang": 2.0},
+            "2024": {"hpi": 3.0, "social_hx": 4.0, "summary_statement": 3.0, "assessment": 4.0, "plan": 3.0, "org_lang": 2.0},
+            "2025": {"hpi": 3.0, "social_hx": 4.0, "summary_statement": 3.0, "assessment": 4.0, "plan": 3.0, "org_lang": 2.0},
+        })
+        stats = compute_cross_session_stats(sessions)
+        consensus = compute_consensus_analysis(sessions, stats)
+        # With identical sessions, ratio should be inf
+        assert consensus.eigenvalue_ratio == float("inf")
+
+        bm = GoldStandardBenchmark(
+            assessment_type_id="kpsom_documentation",
+            created_date="2026-03-06",
+            consensus=consensus,
+        )
+        json_str = generate_benchmark_json(bm)
+        # Should not raise — must be valid JSON
+        data = json.loads(json_str)
+        # eigenvalue_ratio should be None (not Infinity)
+        assert data["consensus"]["eigenvalue_ratio"] is None
