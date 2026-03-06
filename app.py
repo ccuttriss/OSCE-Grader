@@ -1846,44 +1846,81 @@ def tab_synthetic_generator():
             except Exception:
                 st.warning("Could not parse example scores file. Proceeding without.")
 
-        # Create LLM caller
+        # Create LLM caller — synthetic generation needs higher token
+        # limits because rubric JSON responses are large.
         import config as _cfg
         _cfg.MODEL = synth_model
         _cfg.PROVIDER = synth_provider
+        _prev_max_tokens = _cfg.MAX_TOKENS
+        _cfg.MAX_TOKENS = max(_cfg.MAX_TOKENS, 16384)
         caller = create_caller(synth_provider, synth_model)
 
         sessions = []
         progress_bar = st.progress(0, text="Starting generation...")
         status_text = st.empty()
 
-        for s_idx in range(synth_n_sessions):
-            def progress_cb(step_name, current, total, _s=s_idx):
-                overall = (_s * (synth_n_students + 2) + current) / total_calls
-                progress_bar.progress(
-                    min(overall, 1.0),
-                    text=f"Session {_s + 1}/{synth_n_sessions}: {step_name}",
-                )
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        # Track progress across all sessions
+        _progress_lock = threading.Lock()
+        _session_progress = {}  # s_idx -> (step_name, current)
+        total_steps_per_session = synth_n_students + 2  # rubric + notes + scoring
+
+        def _update_progress():
+            with _progress_lock:
+                completed_steps = sum(c for _, c in _session_progress.values())
+                total = synth_n_sessions * total_steps_per_session
+                frac = min(completed_steps / max(total, 1), 0.99)
+                parts = [f"S{k+1}: {n}" for k, (n, _) in sorted(_session_progress.items())]
+                progress_bar.progress(frac, text=" | ".join(parts) if parts else "Starting...")
+
+        def _gen_session(s_idx):
+            def progress_cb(step_name, current, total):
+                with _progress_lock:
+                    _session_progress[s_idx] = (step_name, current)
+                _update_progress()
+
+            return generate_synthetic_session(
+                type_id=synth_type_id,
+                session_index=s_idx,
+                n_students=synth_n_students,
+                variability=synth_variability,
+                llm_caller=caller,
+                temperature=synth_temperature,
+                example_rubric_text=example_rubric_text,
+                example_notes=example_notes,
+                example_scores=example_scores,
+                seed=42 + s_idx,
+                progress_callback=progress_cb,
+            )
+
+        if synth_n_sessions == 1:
+            # Single session — run directly (no extra thread overhead)
             try:
-                session = generate_synthetic_session(
-                    type_id=synth_type_id,
-                    session_index=s_idx,
-                    n_students=synth_n_students,
-                    variability=synth_variability,
-                    llm_caller=caller,
-                    temperature=synth_temperature,
-                    example_rubric_text=example_rubric_text,
-                    example_notes=example_notes,
-                    example_scores=example_scores,
-                    seed=42 + s_idx,
-                    progress_callback=progress_cb,
-                )
-                sessions.append(session)
+                sessions.append(_gen_session(0))
             except Exception as exc:
-                st.error(f"Session {s_idx + 1} generation failed: {exc}")
+                st.error(f"Session 1 generation failed: {exc}")
                 logger.exception("Synthetic generation failed")
-                break
+        else:
+            # Multiple sessions — run in parallel
+            with ThreadPoolExecutor(max_workers=min(synth_n_sessions, 4)) as pool:
+                future_to_idx = {
+                    pool.submit(_gen_session, s_idx): s_idx
+                    for s_idx in range(synth_n_sessions)
+                }
+                for future in as_completed(future_to_idx):
+                    s_idx = future_to_idx[future]
+                    try:
+                        sessions.append(future.result())
+                    except Exception as exc:
+                        st.error(f"Session {s_idx + 1} generation failed: {exc}")
+                        logger.exception("Synthetic generation failed")
 
+            # Sort by session index so order is deterministic
+            sessions.sort(key=lambda s: s.label)
+
+        _cfg.MAX_TOKENS = _prev_max_tokens
         progress_bar.progress(1.0, text="Complete!")
         if sessions:
             st.session_state["synth_sessions"] = sessions
