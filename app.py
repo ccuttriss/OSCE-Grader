@@ -150,8 +150,9 @@ def tab_grade_notes():
     # --- Assessment type selector ---
     type_options = {
         "uk_osce": "Standard OSCE (HPI / PEX / SUM / DDX / Plan)",
-        "kpsom_ipass": "KPSOM OSCE \u2014 I-PASS Handoff",
-        "kpsom_documentation": "KPSOM OSCE \u2014 Clinical Documentation",
+        "kpsom_ipass": "KPSOM \u2014 I-PASS Handoff",
+        "kpsom_documentation": "KPSOM \u2014 Clinical Documentation",
+        "kpsom_ethics": "KPSOM \u2014 Ethics Open-Ended Questions",
     }
 
     selected_type_id = st.selectbox(

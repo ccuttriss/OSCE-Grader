@@ -5,12 +5,15 @@ function to instantiate them by type ID.
 """
 
 from .uk_osce import UKOSCEType
-from .kpsom_osce import KPSOMHandoffType, KPSOMDocumentationType
+from .kpsom_osce import KPSOMHandoffType
+from .kpsom_documentation import KPSOMDocumentationType
+from .kpsom_ethics import KPSOMEthicsType
 
 REGISTRY: dict[str, type] = {
     "uk_osce": UKOSCEType,
     "kpsom_ipass": KPSOMHandoffType,
     "kpsom_documentation": KPSOMDocumentationType,
+    "kpsom_ethics": KPSOMEthicsType,
 }
 
 

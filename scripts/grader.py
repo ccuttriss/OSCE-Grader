@@ -392,7 +392,6 @@ def process_assessment(
         The results DataFrame.
     """
     from assessment_types.base import GradingResult
-    from assessment_types.kpsom_osce import parse_rubric_with_llm, KPSOMBaseType
 
     log_file = os.path.splitext(output_file)[0] + ".log"
     sections = assessment_type.get_sections()
@@ -401,30 +400,68 @@ def process_assessment(
     df, rubric_data = assessment_type.load_inputs(**file_paths)
 
     # --- Parse rubric via LLM for KPSOM types ---
-    if isinstance(assessment_type, KPSOMBaseType) and rubric_data.get("rubric_path"):
+    if hasattr(assessment_type, '_rubric_task_type') and rubric_data.get("rubric_path"):
+        from assessment_types.kpsom_osce import parse_rubric_with_llm
+
+        # Map custom rubric task types to the parse_rubric_with_llm's expected types
+        task_type = assessment_type._rubric_task_type
+        if task_type in ("checklist", "milestone"):
+            parse_type = task_type
+        else:
+            # For documentation, ethics, etc. — use a custom parse prompt
+            parse_type = task_type
+
         logger.info("Parsing rubric with LLM (one-time)...")
-        parsed_rubric = parse_rubric_with_llm(
-            rubric_data["rubric_path"],
-            caller,
-            assessment_type._rubric_task_type,
-        )
+        # Use type-specific rubric parse prompt if available
+        if hasattr(assessment_type, '_rubric_parse_prompt'):
+            import json as _json
+            raw_text = __import__('convert_rubric').convert_docx_to_text(
+                rubric_data["rubric_path"]
+            )
+            messages = [
+                {"role": "system", "content": assessment_type._rubric_parse_prompt},
+                {"role": "user", "content": raw_text},
+            ]
+            response = call_llm(caller, messages, temperature=0.0, top_p=1.0)
+            cleaned = response.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[-1]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+            parsed_rubric = _json.loads(cleaned)
+        else:
+            parsed_rubric = parse_rubric_with_llm(
+                rubric_data["rubric_path"],
+                caller,
+                parse_type,
+            )
         rubric_data["parsed_rubric"] = parsed_rubric
         logger.info("Rubric parsed. Sections found: %s", list(parsed_rubric.keys()))
 
     # --- Faculty scores lookup ---
-    faculty_df = rubric_data.get("faculty_scores")
+    # Support two patterns:
+    # 1. faculty_scores: DataFrame with Student column (handoff type)
+    # 2. faculty_scores_dict: dict keyed by student_id (documentation/ethics)
     faculty_lookup = {}
-    if faculty_df is not None:
-        # Find student ID column
-        student_col = None
-        for col in faculty_df.columns:
-            if col.lower().strip() in ("student", "student id"):
-                student_col = col
-                break
-        if student_col:
-            for _, frow in faculty_df.iterrows():
-                sid = frow[student_col]
-                faculty_lookup[sid] = frow
+    faculty_is_dict = False
+
+    faculty_dict = rubric_data.get("faculty_scores_dict")
+    if faculty_dict is not None:
+        faculty_lookup = faculty_dict
+        faculty_is_dict = True
+    else:
+        faculty_df = rubric_data.get("faculty_scores")
+        if faculty_df is not None:
+            student_col = None
+            for col in faculty_df.columns:
+                if col.lower().strip() in ("student", "student id"):
+                    student_col = col
+                    break
+            if student_col:
+                for _, frow in faculty_df.iterrows():
+                    sid = frow[student_col]
+                    faculty_lookup[sid] = frow
 
     # --- Resume support ---
     if os.path.isfile(output_file):
@@ -529,47 +566,52 @@ def process_assessment(
 
         if sid_int is not None and sid_int in faculty_lookup:
             frow = faculty_lookup[sid_int]
-            fac_scores = {}
-            for sec in sections:
-                # Try to find a matching column in faculty data
-                fac_val = frow.get(sec)
-                if fac_val is not None and pd.notna(fac_val):
-                    try:
-                        fac_scores[sec] = float(fac_val)
-                    except (ValueError, TypeError):
-                        fac_scores[sec] = 0.0
-                else:
-                    fac_scores[sec] = 0.0
 
-            # Total and milestone from faculty
-            total_col = None
-            for col in faculty_lookup[sid_int].index:
-                if col.lower().strip() == "total":
-                    total_col = col
-                    break
-            if total_col and pd.notna(frow.get(total_col)):
-                try:
-                    fac_scores["total"] = float(frow[total_col])
-                except (ValueError, TypeError):
-                    fac_scores["total"] = None
+            if faculty_is_dict:
+                # Dict pattern (documentation/ethics): frow is already a dict
+                fac_scores = dict(frow)
             else:
-                fac_scores["total"] = None
+                # DataFrame row pattern (handoff): frow is a pandas Series
+                fac_scores = {}
+                for sec in sections:
+                    fac_val = frow.get(sec)
+                    if fac_val is not None and pd.notna(fac_val):
+                        try:
+                            fac_scores[sec] = float(fac_val)
+                        except (ValueError, TypeError):
+                            fac_scores[sec] = 0.0
+                    else:
+                        fac_scores[sec] = 0.0
 
-            milestone_col = None
-            for col in faculty_lookup[sid_int].index:
-                if col.lower().strip() == "milestone":
-                    milestone_col = col
-                    break
-            if milestone_col and pd.notna(frow.get(milestone_col)):
-                fac_scores["milestone"] = str(frow[milestone_col])
+                # Total and milestone from faculty
+                total_col = None
+                for col in faculty_lookup[sid_int].index:
+                    if col.lower().strip() == "total":
+                        total_col = col
+                        break
+                if total_col and pd.notna(frow.get(total_col)):
+                    try:
+                        fac_scores["total"] = float(frow[total_col])
+                    except (ValueError, TypeError):
+                        fac_scores["total"] = None
+                else:
+                    fac_scores["total"] = None
 
-            comments_col = None
-            for col in faculty_lookup[sid_int].index:
-                if col.lower().strip() == "comments":
-                    comments_col = col
-                    break
-            if comments_col and pd.notna(frow.get(comments_col)):
-                fac_scores["comments"] = str(frow[comments_col])
+                milestone_col = None
+                for col in faculty_lookup[sid_int].index:
+                    if col.lower().strip() == "milestone":
+                        milestone_col = col
+                        break
+                if milestone_col and pd.notna(frow.get(milestone_col)):
+                    fac_scores["milestone"] = str(frow[milestone_col])
+
+                comments_col = None
+                for col in faculty_lookup[sid_int].index:
+                    if col.lower().strip() == "comments":
+                        comments_col = col
+                        break
+                if comments_col and pd.notna(frow.get(comments_col)):
+                    fac_scores["comments"] = str(frow[comments_col])
 
         result = GradingResult(
             student_id=student_id,
