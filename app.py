@@ -47,6 +47,8 @@ from gold_standard import (
     compute_cross_session_stats,
     compute_consensus_analysis,
     generate_example_sessions,
+    session_to_dataframe,
+    session_to_excel,
     build_bias_prompt,
     parse_bias_response,
     generate_benchmark_excel,
@@ -1117,10 +1119,10 @@ def tab_gold_standard():
     )
 
     if data_source == "Use built-in examples":
-        ecol1, ecol2 = st.columns(2)
+        ecol1, ecol2, ecol3 = st.columns(3)
         with ecol1:
             n_sessions = st.slider(
-                "Number of example sessions",
+                "Number of sessions",
                 min_value=2,
                 max_value=6,
                 value=3,
@@ -1134,15 +1136,78 @@ def tab_gold_standard():
                 value=8,
                 key="gs_example_students",
             )
+        with ecol3:
+            variability = st.slider(
+                "Variability",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.5,
+                step=0.05,
+                key="gs_variability",
+                help=(
+                    "Controls how much variation exists in the generated scores. "
+                    "**Low (0.0)**: tight, homogeneous scores with minimal session drift — "
+                    "simulates highly calibrated faculty. "
+                    "**Medium (0.5)**: realistic variation you'd expect across semesters. "
+                    "**High (1.0)**: wide score spread with large session-to-session bias — "
+                    "simulates poorly calibrated or inconsistent raters."
+                ),
+            )
 
-        if st.button("Load Examples", type="primary", key="gs_load_examples"):
+        if st.button("Generate Examples", type="primary", key="gs_load_examples"):
             sessions = generate_example_sessions(
                 gs_type_id,
                 n_sessions=n_sessions,
                 students_per_session=students_per,
+                variability=variability,
             )
             st.session_state["gs_sessions"] = sessions
             st.session_state["gs_type_id"] = gs_type_id
+            st.session_state["gs_example_generated"] = True
+
+        # --- Preview & download generated examples ---
+        if st.session_state.get("gs_example_generated") and "gs_sessions" in st.session_state:
+            example_sessions = st.session_state["gs_sessions"]
+            st.divider()
+            st.subheader("Generated Example Sessions")
+            st.caption(
+                "Preview the generated faculty score data below. Each tab shows "
+                "one session — the same format you would upload as a real file."
+            )
+            session_tabs = st.tabs(
+                [f"{s.label}" for s in example_sessions]
+            )
+            for tab, session in zip(session_tabs, example_sessions):
+                with tab:
+                    preview_df = session_to_dataframe(session)
+                    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+
+                    # Per-session download
+                    xlsx_bytes = session_to_excel(session)
+                    safe_label = session.label.replace(" ", "_")
+                    st.download_button(
+                        f"Download {session.label} (.xlsx)",
+                        data=xlsx_bytes,
+                        file_name=f"example_{gs_type_id}_{safe_label}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"gs_dl_{safe_label}",
+                    )
+
+            # Download all sessions as a zip
+            import zipfile
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for session in example_sessions:
+                    safe_label = session.label.replace(" ", "_")
+                    fname = f"example_{gs_type_id}_{safe_label}.xlsx"
+                    zf.writestr(fname, session_to_excel(session))
+            st.download_button(
+                "Download All Sessions (.zip)",
+                data=zip_buf.getvalue(),
+                file_name=f"example_{gs_type_id}_all_sessions.zip",
+                mime="application/zip",
+                key="gs_dl_all_zip",
+            )
 
     else:
         # --- File upload ---
