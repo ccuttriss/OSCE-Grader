@@ -1846,10 +1846,13 @@ def tab_synthetic_generator():
             except Exception:
                 st.warning("Could not parse example scores file. Proceeding without.")
 
-        # Create LLM caller
+        # Create LLM caller — synthetic generation needs higher token
+        # limits because rubric JSON responses are large.
         import config as _cfg
         _cfg.MODEL = synth_model
         _cfg.PROVIDER = synth_provider
+        _prev_max_tokens = _cfg.MAX_TOKENS
+        _cfg.MAX_TOKENS = max(_cfg.MAX_TOKENS, 16384)
         caller = create_caller(synth_provider, synth_model)
 
         sessions = []
@@ -1884,6 +1887,7 @@ def tab_synthetic_generator():
                 logger.exception("Synthetic generation failed")
                 break
 
+        _cfg.MAX_TOKENS = _prev_max_tokens
         progress_bar.progress(1.0, text="Complete!")
         if sessions:
             st.session_state["synth_sessions"] = sessions
