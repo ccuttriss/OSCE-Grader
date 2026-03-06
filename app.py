@@ -41,6 +41,17 @@ from providers import create_caller
 from convert_rubric import convert_docx_to_text, convert_pdf_to_text
 from assessment_types import REGISTRY, get_type
 from grader import process_assessment
+from gold_standard import (
+    load_faculty_session,
+    validate_sessions,
+    compute_cross_session_stats,
+    build_bias_prompt,
+    parse_bias_response,
+    generate_benchmark_excel,
+    generate_benchmark_json,
+    GoldStandardBenchmark,
+    BiasAnalysisResult,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -1070,16 +1081,367 @@ def tab_convert():
 
 
 # =========================================================================
+# TAB 5: GOLD STANDARD ANALYSIS
+# =========================================================================
+def tab_gold_standard():
+    st.header("Gold Standard Analysis")
+    st.markdown(
+        "Upload 2\u201310 faculty score files from different administrations of the same "
+        "exam to analyze scoring patterns, detect bias, and establish gold standard benchmarks."
+    )
+
+    # --- Assessment type selector ---
+    gs_type_options = {
+        "kpsom_ipass": "KPSOM \u2014 I-PASS Handoff",
+        "kpsom_documentation": "KPSOM \u2014 Clinical Documentation",
+        "kpsom_ethics": "KPSOM \u2014 Ethics Open-Ended Questions",
+        "uk_osce": "Standard OSCE (HPI / PEX / SUM / DDX / Plan)",
+    }
+    gs_type_id = st.selectbox(
+        "Assessment type",
+        list(gs_type_options.keys()),
+        format_func=lambda k: gs_type_options[k],
+        key="gs_type_select",
+    )
+
+    # --- File upload ---
+    uploaded = st.file_uploader(
+        "Upload faculty score files (2\u201310 Excel files)",
+        type=["xlsx"],
+        accept_multiple_files=True,
+        key="gs_files",
+    )
+
+    if not uploaded:
+        st.info("Upload at least 2 faculty score files to begin.")
+        return
+
+    if len(uploaded) < 2:
+        st.warning("At least 2 files are required for cross-session analysis.")
+        return
+    if len(uploaded) > 10:
+        st.error("Maximum of 10 files allowed. Please remove some files.")
+        return
+
+    # --- Session labels ---
+    st.subheader("Session Labels")
+    st.caption("Provide a label for each file (e.g., '2023 Spring', '2024 Fall').")
+    labels = []
+    for i, f in enumerate(uploaded):
+        lbl = st.text_input(
+            f"Label for {f.name}",
+            value=f"Session {i + 1}",
+            key=f"gs_label_{i}",
+        )
+        labels.append(lbl)
+
+    st.divider()
+
+    # --- Load sessions ---
+    if st.button("Analyze", type="primary", key="gs_analyze"):
+        sessions = []
+        with st.spinner("Loading faculty score files..."):
+            for i, f in enumerate(uploaded):
+                path = _save_upload(f)
+                try:
+                    session = load_faculty_session(path, gs_type_id, labels[i])
+                    sessions.append(session)
+                except Exception as exc:
+                    st.error(f"Error loading {f.name}: {exc}")
+                    return
+
+        err = validate_sessions(sessions)
+        if err:
+            st.error(err)
+            return
+
+        st.session_state["gs_sessions"] = sessions
+        st.session_state["gs_type_id"] = gs_type_id
+
+    # --- Display results if sessions are loaded ---
+    if "gs_sessions" not in st.session_state:
+        return
+
+    sessions = st.session_state["gs_sessions"]
+    gs_type_id = st.session_state["gs_type_id"]
+
+    # Compute statistics
+    stats = compute_cross_session_stats(sessions)
+    st.session_state["gs_stats"] = stats
+
+    # --- Step 2: Statistical Analysis ---
+    st.divider()
+    st.subheader("Cross-Session Statistics")
+
+    mcol1, mcol2, mcol3 = st.columns(3)
+    mcol1.metric("Sessions", stats.session_count)
+    mcol2.metric("Total Students", stats.total_students)
+    mcol3.metric("Assessment Type", gs_type_options.get(gs_type_id, gs_type_id))
+
+    # Per-section stats table
+    rows = []
+    for sec in stats.sections:
+        ss = stats.section_stats.get(sec)
+        if ss is None:
+            continue
+        row = {
+            "Section": sec,
+            "Mean": round(ss.mean, 2),
+            "Median": round(ss.median, 2),
+            "Std Dev": round(ss.std, 2),
+            "Min": round(ss.min_score, 2),
+            "Max": round(ss.max_score, 2),
+        }
+        for lbl in stats.session_labels:
+            m = ss.per_session_means.get(lbl)
+            row[lbl] = round(m, 2) if m is not None else ""
+        rows.append(row)
+
+    if rows:
+        stats_df = pd.DataFrame(rows)
+        st.dataframe(stats_df, use_container_width=True, hide_index=True)
+
+    # Bar chart of per-section means
+    chart_data = pd.DataFrame({
+        "Section": stats.sections,
+        "Mean Score": [
+            round(stats.section_stats[s].mean, 2)
+            for s in stats.sections
+        ],
+    }).set_index("Section")
+    st.bar_chart(chart_data)
+
+    # Per-session comparison
+    with st.expander("Per-Session Means (drift view)"):
+        drift_rows = []
+        for sec in stats.sections:
+            ss = stats.section_stats.get(sec)
+            if ss is None:
+                continue
+            row = {"Section": sec}
+            for lbl in stats.session_labels:
+                row[lbl] = round(ss.per_session_means.get(lbl, 0), 2)
+            drift_rows.append(row)
+        if drift_rows:
+            st.dataframe(pd.DataFrame(drift_rows), use_container_width=True, hide_index=True)
+
+    # --- Step 3: LLM Bias Analysis ---
+    st.divider()
+    st.subheader("LLM Bias Analysis")
+
+    # Model selector (simplified)
+    gs_model_options = list(MODEL_INFO.keys())
+    gs_default_idx = gs_model_options.index("gemini-2.5-flash") if "gemini-2.5-flash" in gs_model_options else 0
+    gs_model = st.radio(
+        "Choose a model for bias analysis",
+        gs_model_options,
+        index=gs_default_idx,
+        format_func=lambda m: f"{m} ({PROVIDER_LABELS[MODEL_INFO[m]['provider']]})",
+        key="gs_model_select",
+    )
+
+    gs_provider = MODEL_INFO[gs_model]["provider"]
+    gs_env_var = API_KEY_ENV_VARS[gs_provider]
+    gs_has_key = bool(os.environ.get(gs_env_var, "").strip())
+
+    if gs_has_key:
+        st.success(f"API key found in environment (`{gs_env_var}`)")
+        gs_api_key_input = None
+    else:
+        gs_api_key_input = st.text_input(
+            f"{PROVIDER_LABELS[gs_provider]} API Key",
+            type="password",
+            key="gs_api_key",
+            help=f"Set {gs_env_var} environment variable to avoid entering this each time.",
+        )
+
+    if st.button("Run Bias Analysis", key="gs_run_bias"):
+        if not gs_has_key and not gs_api_key_input:
+            st.error("Please provide an API key.")
+            return
+
+        if gs_api_key_input and not gs_has_key:
+            os.environ[gs_env_var] = gs_api_key_input
+
+        with st.spinner("Running LLM bias analysis..."):
+            try:
+                caller = create_caller(gs_provider, gs_model)
+                messages = build_bias_prompt(stats, gs_type_id)
+                response = call_llm(caller, messages, temperature=0.3, top_p=1.0)
+                result = parse_bias_response(response)
+                st.session_state["gs_bias_result"] = result
+            except Exception as exc:
+                st.error(f"LLM analysis failed: {exc}")
+                return
+
+    if "gs_bias_result" in st.session_state:
+        bias = st.session_state["gs_bias_result"]
+
+        st.markdown(f"**Summary:** {bias.summary}")
+
+        if bias.systematic_biases:
+            with st.expander("Systematic Biases", expanded=True):
+                for item in bias.systematic_biases:
+                    st.markdown(
+                        f"- **{item.get('section', 'N/A')}** "
+                        f"({item.get('direction', '')}, {item.get('magnitude', '')}): "
+                        f"{item.get('description', '')}"
+                    )
+
+        if bias.section_patterns:
+            with st.expander("Section Patterns"):
+                for item in bias.section_patterns:
+                    st.markdown(
+                        f"- **{item.get('section', 'N/A')}**: {item.get('description', '')}"
+                    )
+
+        if bias.drift_over_years:
+            with st.expander("Year-over-Year Drift"):
+                for item in bias.drift_over_years:
+                    st.markdown(
+                        f"- **{item.get('section', 'N/A')}** "
+                        f"({item.get('direction', '')}): {item.get('description', '')}"
+                    )
+
+        if bias.distribution_anomalies:
+            with st.expander("Distribution Anomalies"):
+                for item in bias.distribution_anomalies:
+                    st.markdown(
+                        f"- **{item.get('section', 'N/A')}**: {item.get('description', '')}"
+                    )
+
+        if bias.outlier_patterns:
+            with st.expander("Outlier Patterns"):
+                for item in bias.outlier_patterns:
+                    st.markdown(f"- {item.get('description', '')}")
+
+        if bias.recommendations:
+            with st.expander("Recommendations", expanded=True):
+                for rec in bias.recommendations:
+                    st.markdown(f"- {rec}")
+
+    # --- Step 4: Faculty Review & Benchmark Input ---
+    st.divider()
+    st.subheader("Establish Gold Standard Benchmarks")
+    st.caption(
+        "Review the analysis above and enter benchmark score ranges for each section. "
+        "These define the expected faculty scoring corridor for this assessment."
+    )
+
+    benchmark_data = {}
+    sections = stats.sections
+
+    for sec in sections:
+        ss = stats.section_stats.get(sec)
+        with st.expander(f"Section: {sec}", expanded=False):
+            if ss:
+                st.markdown(
+                    f"**Stats:** mean={ss.mean:.2f}, median={ss.median:.2f}, "
+                    f"std={ss.std:.2f}, range=[{ss.min_score:.1f}\u2013{ss.max_score:.1f}]"
+                )
+
+            bcol1, bcol2 = st.columns(2)
+            with bcol1:
+                bmin = st.number_input(
+                    "Benchmark Min",
+                    value=round(ss.mean - ss.std, 1) if ss else 0.0,
+                    step=0.5,
+                    key=f"gs_bmin_{sec}",
+                )
+            with bcol2:
+                bmax = st.number_input(
+                    "Benchmark Max",
+                    value=round(ss.mean + ss.std, 1) if ss else 5.0,
+                    step=0.5,
+                    key=f"gs_bmax_{sec}",
+                )
+
+            notes = st.text_area(
+                "Notes / rationale",
+                key=f"gs_notes_{sec}",
+                height=68,
+            )
+            approved = st.text_input(
+                "Approved by (faculty name)",
+                key=f"gs_approved_{sec}",
+            )
+
+            benchmark_data[sec] = {
+                "min": bmin,
+                "max": bmax,
+                "notes": notes,
+                "approved_by": approved,
+            }
+
+    # --- Step 5: Generate & Download ---
+    st.divider()
+    if st.button("Generate Gold Standard", type="primary", key="gs_generate"):
+        from datetime import date as _date
+
+        bias_result = st.session_state.get("gs_bias_result", BiasAnalysisResult())
+        benchmark = GoldStandardBenchmark(
+            assessment_type_id=gs_type_id,
+            created_date=_date.today().isoformat(),
+            sections=benchmark_data,
+            bias_findings=bias_result,
+            stats=stats,
+            version=1,
+        )
+
+        excel_bytes = generate_benchmark_excel(benchmark)
+        json_str = generate_benchmark_json(benchmark)
+
+        st.session_state["gs_excel"] = excel_bytes
+        st.session_state["gs_json"] = json_str
+        st.session_state["gs_benchmark"] = benchmark
+
+    if "gs_benchmark" in st.session_state:
+        bm = st.session_state["gs_benchmark"]
+        st.success("Gold standard benchmark generated.")
+
+        # Preview
+        preview_rows = []
+        for sec, info in bm.sections.items():
+            preview_rows.append({
+                "Section": sec,
+                "Min": info["min"],
+                "Max": info["max"],
+                "Notes": info.get("notes", ""),
+                "Approved By": info.get("approved_by", ""),
+            })
+        st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
+
+        dcol1, dcol2 = st.columns(2)
+        with dcol1:
+            st.download_button(
+                "Download Excel",
+                data=st.session_state["gs_excel"],
+                file_name=f"gold_standard_{bm.assessment_type_id}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="gs_download_excel",
+            )
+        with dcol2:
+            st.download_button(
+                "Download JSON",
+                data=st.session_state["gs_json"],
+                file_name=f"gold_standard_{bm.assessment_type_id}.json",
+                mime="application/json",
+                key="gs_download_json",
+            )
+
+
+# =========================================================================
 # Main app layout
 # =========================================================================
 st.title("OSCE Grader")
 st.caption("AI-powered grading for medical student post-encounter notes")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Grade Notes",
     "Analysis Dashboard",
     "Flagged Items",
     "Convert Rubric",
+    "Gold Standard",
 ])
 
 with tab1:
@@ -1093,3 +1455,6 @@ with tab3:
 
 with tab4:
     tab_convert()
+
+with tab5:
+    tab_gold_standard()
