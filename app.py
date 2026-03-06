@@ -39,6 +39,8 @@ from grader import (
 )
 from providers import create_caller
 from convert_rubric import convert_docx_to_text, convert_pdf_to_text
+from assessment_types import REGISTRY, get_type
+from grader import process_assessment
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -145,39 +147,65 @@ def tab_grade_notes():
     st.header("Grade Notes")
     st.markdown("Upload your rubric, answer key, and student notes to grade with AI.")
 
-    # --- File uploads ---
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        rubric_file = st.file_uploader("Rubric (.xlsx)", type=["xlsx"], key="rubric_upload")
-    with col2:
-        key_file = st.file_uploader("Answer Key (.xlsx)", type=["xlsx"], key="key_upload")
-    with col3:
-        notes_file = st.file_uploader("Student Notes (.xlsx)", type=["xlsx"], key="notes_upload")
+    # --- Assessment type selector ---
+    type_options = {
+        "uk_osce": "Standard OSCE (HPI / PEX / SUM / DDX / Plan)",
+        "kpsom_ipass": "KPSOM OSCE \u2014 I-PASS Handoff",
+        "kpsom_documentation": "KPSOM OSCE \u2014 Clinical Documentation",
+    }
+
+    selected_type_id = st.selectbox(
+        "Assessment Type",
+        options=list(type_options.keys()),
+        format_func=lambda k: type_options[k],
+        key="assessment_type",
+    )
+    assessment_type = get_type(selected_type_id)
+    is_uk = selected_type_id == "uk_osce"
+
+    st.divider()
+
+    # --- Dynamic file uploads ---
+    required_files = assessment_type.get_required_files()
+    uploaded_files = {}
+    file_cols = st.columns(len(required_files))
+    for i, file_spec in enumerate(required_files):
+        with file_cols[i]:
+            label = file_spec["label"]
+            if not file_spec.get("required", True):
+                label += " (optional)"
+            uploaded_files[file_spec["key"]] = st.file_uploader(
+                label,
+                type=file_spec["types"],
+                key=f"upload_{file_spec['key']}",
+            )
 
     # --- Previews ---
-    if rubric_file:
-        with st.expander("Rubric preview", expanded=False):
-            df_r = pd.read_excel(rubric_file)
-            st.dataframe(df_r.head(5), use_container_width=True)
-            rubric_file.seek(0)
+    for file_spec in required_files:
+        fkey = file_spec["key"]
+        uf = uploaded_files.get(fkey)
+        if uf and file_spec["types"] == ["xlsx"]:
+            with st.expander(f"{file_spec['label']} preview", expanded=False):
+                try:
+                    df_preview = pd.read_excel(uf)
+                    st.dataframe(df_preview.head(5), use_container_width=True)
+                except Exception:
+                    st.warning("Could not preview this file.")
+                uf.seek(0)
 
-    if key_file:
-        with st.expander("Answer Key preview", expanded=False):
-            df_k = pd.read_excel(key_file)
-            st.dataframe(df_k.head(5), use_container_width=True)
-            key_file.seek(0)
-
+    # UK-specific section detection
     detected_sections = []
-    if notes_file:
-        with st.expander("Student Notes preview", expanded=False):
-            df_n = pd.read_excel(notes_file)
-            st.dataframe(df_n.head(5), use_container_width=True)
-            detected_sections = _detect_sections(df_n)
-            if detected_sections:
-                st.info(f"Detected sections: **{', '.join(s.upper() for s in detected_sections)}**")
-            else:
-                st.warning("No recognized section columns found.")
-            notes_file.seek(0)
+    if is_uk:
+        notes_uf = uploaded_files.get("responses")
+        if notes_uf:
+            try:
+                df_n = pd.read_excel(notes_uf)
+                detected_sections = _detect_sections(df_n)
+                if detected_sections:
+                    st.info(f"Detected sections: **{', '.join(s.upper() for s in detected_sections)}**")
+                notes_uf.seek(0)
+            except Exception:
+                pass
 
     st.divider()
 
@@ -264,9 +292,10 @@ def tab_grade_notes():
 
     # --- Validation ---
     def _validate():
-        if not rubric_file or not key_file or not notes_file:
-            st.error("Please upload all three files (rubric, answer key, student notes).")
-            return False
+        for file_spec in required_files:
+            if file_spec.get("required", True) and not uploaded_files.get(file_spec["key"]):
+                st.error(f"Please upload: {file_spec['label']}")
+                return False
         if not has_env_key and not api_key_input:
             st.error(f"Please provide a {PROVIDER_LABELS[provider]} API key.")
             return False
@@ -293,23 +322,49 @@ def tab_grade_notes():
         _set_api_key()
         _set_config()
 
-        rubric_path = _save_upload(rubric_file)
-        key_path = _save_upload(key_file)
-        notes_path = _save_upload(notes_file)
+        if is_uk:
+            rubric_path = _save_upload(uploaded_files["rubric"])
+            key_path = _save_upload(uploaded_files["answer_key"])
+            notes_path = _save_upload(uploaded_files["responses"])
 
-        try:
-            result = run_dry_run(notes_path, rubric_path, key_path)
-            st.success("Dry run complete!")
-            dcol1, dcol2, dcol3, dcol4 = st.columns(4)
-            dcol1.metric("Students", result["total_rows"])
-            dcol2.metric("API Calls", result["api_calls"])
-            dcol3.metric("Est. Cost", result["est_cost"])
-            dcol4.metric("Model", result["model"])
-            st.info(f"Sections: {', '.join(s.upper() for s in result['sections'])}")
-        except (SystemExit, ValueError) as e:
-            st.error(f"Dry run failed: {e}")
-        except Exception as e:
-            st.error(f"Unexpected error: {e}")
+            try:
+                result = run_dry_run(notes_path, rubric_path, key_path)
+                st.success("Dry run complete!")
+                dcol1, dcol2, dcol3, dcol4 = st.columns(4)
+                dcol1.metric("Students", result["total_rows"])
+                dcol2.metric("API Calls", result["api_calls"])
+                dcol3.metric("Est. Cost", result["est_cost"])
+                dcol4.metric("Model", result["model"])
+                st.info(f"Sections: {', '.join(s.upper() for s in result['sections'])}")
+            except (SystemExit, ValueError) as e:
+                st.error(f"Dry run failed: {e}")
+            except Exception as e:
+                st.error(f"Unexpected error: {e}")
+        else:
+            # KPSOM dry run: count students and estimate API calls
+            try:
+                saved_paths = {}
+                for file_spec in required_files:
+                    uf = uploaded_files.get(file_spec["key"])
+                    if uf:
+                        saved_paths[file_spec["key"]] = _save_upload(uf)
+                df_dry, _ = assessment_type.load_inputs(**saved_paths)
+                sections = assessment_type.get_sections()
+                n_students = len(df_dry)
+                api_calls = n_students * len(sections) + 1  # +1 for rubric parsing
+                cost_per_call = config.MODEL_COSTS.get(config.MODEL, (0.15, 0.60))
+                est_cost = api_calls * (cost_per_call[0] * 1.0 / 1000 + cost_per_call[1] * 0.5 / 1000)
+                st.success("Dry run complete!")
+                dcol1, dcol2, dcol3, dcol4 = st.columns(4)
+                dcol1.metric("Students", n_students)
+                dcol2.metric("API Calls", api_calls)
+                dcol3.metric("Est. Cost", f"${est_cost:.2f}")
+                dcol4.metric("Model", config.MODEL)
+                st.info(f"Sections: {', '.join(s.upper().replace('_', ' ') for s in sections)}")
+            except (SystemExit, ValueError) as e:
+                st.error(f"Dry run failed: {e}")
+            except Exception as e:
+                st.error(f"Unexpected error: {e}")
 
     # --- Grade ---
     if grade_clicked:
@@ -318,33 +373,6 @@ def tab_grade_notes():
 
         _set_api_key()
         _set_config()
-
-        rubric_path = _save_upload(rubric_file)
-        key_path = _save_upload(key_file)
-        notes_path = _save_upload(notes_file)
-
-        try:
-            rubric_content, answer_key_content = read_rubric_and_key(rubric_path, key_path)
-        except SystemExit:
-            st.error("Failed to read rubric or answer key files. Check format.")
-            return
-
-        try:
-            df = pd.read_excel(notes_path)
-        except Exception as e:
-            st.error(f"Failed to read student notes: {e}")
-            return
-
-        sections = config.SECTIONS
-        missing = validate_input_columns(df, sections)
-        if missing:
-            st.error(f"Missing columns in student notes: {', '.join(missing)}")
-            return
-
-        total_rows = len(df)
-        if total_rows == 0:
-            st.warning("Student notes file has no data rows.")
-            return
 
         # Output paths
         output_dir = os.path.join(REPO_ROOT, "uploads_tmp")
@@ -358,97 +386,227 @@ def tab_grade_notes():
             st.error(f"Failed to create {PROVIDER_LABELS[provider]} caller. Check your API key.")
             return
 
-        # Progress bar + status
-        progress_bar = st.progress(0, text="Starting grading...")
-        status = st.status("Grading in progress...", expanded=True)
-        effective_workers = min(workers, len(sections))
+        if is_uk:
+            # ---- UK grading path (unchanged) ----
+            rubric_path = _save_upload(uploaded_files["rubric"])
+            key_path = _save_upload(uploaded_files["answer_key"])
+            notes_path = _save_upload(uploaded_files["responses"])
 
-        graded = 0
-        for index, row in df.iterrows():
-            pct = graded / total_rows
-            progress_bar.progress(pct, text=f"Student {graded + 1} of {total_rows}...")
-            status.update(label=f"Grading student {graded + 1} of {total_rows}...")
-            status.write(f"Processing student {graded + 1}...")
+            try:
+                rubric_content, answer_key_content = read_rubric_and_key(rubric_path, key_path)
+            except SystemExit:
+                st.error("Failed to read rubric or answer key files. Check format.")
+                return
 
-            gradable = []
-            for section in sections:
-                section_content = row[section]
-                if pd.notna(section_content):
-                    gradable.append((section, str(section_content)))
+            try:
+                df = pd.read_excel(notes_path)
+            except Exception as e:
+                st.error(f"Failed to read student notes: {e}")
+                return
 
-            if effective_workers <= 1 or len(gradable) <= 1:
-                for section, content in gradable:
-                    try:
-                        explanation, numeric_score = grade_section_with_key(
-                            caller, rubric_content, answer_key_content,
-                            content, section, log_file, temperature, config.TOP_P,
-                        )
-                        df.at[index, f"{section}_gpt_explanation"] = explanation
-                        df.at[index, f"{section}_gpt_score"] = numeric_score
-                    except SystemExit:
-                        st.error(f"API error grading section '{section}' for student {graded + 1}")
-                        return
-                    except Exception as e:
-                        st.error(f"Error grading {section} for student {graded + 1}: {e}")
-                        return
-            else:
-                futures = {}
-                with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+            sections = config.SECTIONS
+            missing = validate_input_columns(df, sections)
+            if missing:
+                st.error(f"Missing columns in student notes: {', '.join(missing)}")
+                return
+
+            total_rows = len(df)
+            if total_rows == 0:
+                st.warning("Student notes file has no data rows.")
+                return
+
+            progress_bar = st.progress(0, text="Starting grading...")
+            status = st.status("Grading in progress...", expanded=True)
+            effective_workers = min(workers, len(sections))
+
+            graded = 0
+            for index, row in df.iterrows():
+                pct = graded / total_rows
+                progress_bar.progress(pct, text=f"Student {graded + 1} of {total_rows}...")
+                status.update(label=f"Grading student {graded + 1} of {total_rows}...")
+                status.write(f"Processing student {graded + 1}...")
+
+                gradable = []
+                for section in sections:
+                    section_content = row[section]
+                    if pd.notna(section_content):
+                        gradable.append((section, str(section_content)))
+
+                if effective_workers <= 1 or len(gradable) <= 1:
                     for section, content in gradable:
-                        future = pool.submit(
-                            grade_section_with_key,
-                            caller, rubric_content, answer_key_content,
-                            content, section, log_file, temperature, config.TOP_P,
-                        )
-                        futures[section] = future
+                        try:
+                            explanation, numeric_score = grade_section_with_key(
+                                caller, rubric_content, answer_key_content,
+                                content, section, log_file, temperature, config.TOP_P,
+                            )
+                            df.at[index, f"{section}_gpt_explanation"] = explanation
+                            df.at[index, f"{section}_gpt_score"] = numeric_score
+                        except SystemExit:
+                            st.error(f"API error grading section '{section}' for student {graded + 1}")
+                            return
+                        except Exception as e:
+                            st.error(f"Error grading {section} for student {graded + 1}: {e}")
+                            return
+                else:
+                    futures = {}
+                    with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+                        for section, content in gradable:
+                            future = pool.submit(
+                                grade_section_with_key,
+                                caller, rubric_content, answer_key_content,
+                                content, section, log_file, temperature, config.TOP_P,
+                            )
+                            futures[section] = future
 
-                for section, future in futures.items():
-                    try:
-                        explanation, numeric_score = future.result()
-                        df.at[index, f"{section}_gpt_explanation"] = explanation
-                        df.at[index, f"{section}_gpt_score"] = numeric_score
-                    except SystemExit:
-                        st.error(f"API error grading section '{section}' for student {graded + 1}")
-                        return
-                    except Exception as e:
-                        st.error(f"Error grading {section} for student {graded + 1}: {e}")
-                        return
+                    for section, future in futures.items():
+                        try:
+                            explanation, numeric_score = future.result()
+                            df.at[index, f"{section}_gpt_explanation"] = explanation
+                            df.at[index, f"{section}_gpt_score"] = numeric_score
+                        except SystemExit:
+                            st.error(f"API error grading section '{section}' for student {graded + 1}")
+                            return
+                        except Exception as e:
+                            st.error(f"Error grading {section} for student {graded + 1}: {e}")
+                            return
 
-            graded += 1
-            _save_results(df, output_file)
+                graded += 1
+                _save_results(df, output_file)
 
-        progress_bar.progress(1.0, text="Grading complete!")
-        status.update(label="Grading complete!", state="complete")
+            progress_bar.progress(1.0, text="Grading complete!")
+            status.update(label="Grading complete!", state="complete")
 
-        # Store results in session state for other tabs
-        st.session_state["results_df"] = df
-        st.session_state["results_sections"] = sections
+            st.session_state["results_df"] = df
+            st.session_state["results_sections"] = sections
 
-        # Summary stats
-        stats = compute_summary_stats(df, sections)
-        if stats:
-            st.subheader("Summary Statistics")
-            st.dataframe(pd.DataFrame(stats), use_container_width=True)
+            stats = compute_summary_stats(df, sections)
+            if stats:
+                st.subheader("Summary Statistics")
+                st.dataframe(pd.DataFrame(stats), use_container_width=True)
 
-        # Download buttons
-        dcol1, dcol2 = st.columns(2)
-        with dcol1:
-            with open(output_file, "rb") as f:
-                st.download_button(
-                    "Download Results (.xlsx)",
-                    data=f,
-                    file_name="osce_results.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-        with dcol2:
-            if os.path.isfile(log_file):
-                with open(log_file, "rb") as f:
+            dcol1, dcol2 = st.columns(2)
+            with dcol1:
+                with open(output_file, "rb") as f:
                     st.download_button(
-                        "Download Log (.log)",
+                        "Download Results (.xlsx)",
                         data=f,
-                        file_name="osce_grading.log",
-                        mime="text/plain",
+                        file_name="osce_results.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
+            with dcol2:
+                if os.path.isfile(log_file):
+                    with open(log_file, "rb") as f:
+                        st.download_button(
+                            "Download Log (.log)",
+                            data=f,
+                            file_name="osce_grading.log",
+                            mime="text/plain",
+                        )
+
+        else:
+            # ---- KPSOM grading path ----
+            saved_paths = {}
+            for file_spec in required_files:
+                uf = uploaded_files.get(file_spec["key"])
+                if uf:
+                    saved_paths[file_spec["key"]] = _save_upload(uf)
+
+            sections = assessment_type.get_sections()
+
+            progress_bar = st.progress(0, text="Starting grading...")
+            status = st.status("Grading in progress...", expanded=True)
+
+            def _kpsom_progress(current, total):
+                if total > 0:
+                    pct = current / total
+                    progress_bar.progress(pct, text=f"Student {current + 1} of {total}...")
+                    status.update(label=f"Grading student {current + 1} of {total}...")
+                    status.write(f"Processing student {current + 1}...")
+
+            try:
+                result_df = process_assessment(
+                    assessment_type,
+                    caller,
+                    saved_paths,
+                    output_file,
+                    temperature,
+                    config.TOP_P,
+                    max_workers=workers,
+                    progress_callback=_kpsom_progress,
+                )
+            except (SystemExit, ValueError) as e:
+                st.error(f"Grading failed: {e}")
+                return
+            except Exception as e:
+                st.error(f"Unexpected error during grading: {e}")
+                return
+
+            progress_bar.progress(1.0, text="Grading complete!")
+            status.update(label="Grading complete!", state="complete")
+
+            st.session_state["results_df"] = result_df
+            st.session_state["results_sections"] = sections
+
+            # --- KPSOM Results Display ---
+            if not result_df.empty:
+                # Score summary table
+                st.subheader("Score Summary")
+                summary_rows = []
+                for sec in sections:
+                    ai_col = f"{sec}_ai_score"
+                    fac_col = f"{sec}_faculty_score"
+                    row_data = {"Section": sec.upper().replace("_", " ")}
+                    if ai_col in result_df.columns:
+                        ai_scores = pd.to_numeric(result_df[ai_col], errors="coerce").dropna()
+                        row_data["AI Mean"] = round(ai_scores.mean(), 2) if len(ai_scores) > 0 else None
+                    if fac_col in result_df.columns:
+                        fac_scores = pd.to_numeric(result_df[fac_col], errors="coerce").dropna()
+                        row_data["Faculty Mean"] = round(fac_scores.mean(), 2) if len(fac_scores) > 0 else None
+                    delta_col = f"{sec}_delta"
+                    if delta_col in result_df.columns:
+                        deltas = pd.to_numeric(result_df[delta_col], errors="coerce").dropna()
+                        row_data["Mean Delta"] = round(deltas.mean(), 2) if len(deltas) > 0 else None
+                    summary_rows.append(row_data)
+                st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+                # Milestone distribution
+                if "ai_milestone" in result_df.columns:
+                    st.subheader("Milestone Distribution")
+                    milestone_counts = result_df["ai_milestone"].value_counts()
+                    st.dataframe(milestone_counts.reset_index().rename(
+                        columns={"index": "Milestone", "ai_milestone": "Milestone", "count": "Count"}
+                    ), use_container_width=True, hide_index=True)
+
+                # Faculty comparison
+                if "faculty_total" in result_df.columns and "ai_total" in result_df.columns:
+                    with st.expander("Faculty vs AI Comparison (delta > 2 points)"):
+                        comparison = result_df[["student_id", "ai_total", "faculty_total", "total_delta"]].copy()
+                        comparison = comparison.dropna(subset=["total_delta"])
+                        outliers = comparison[comparison["total_delta"].abs() > 2]
+                        if len(outliers) > 0:
+                            st.dataframe(outliers, use_container_width=True, hide_index=True)
+                        else:
+                            st.success("No students differ by more than 2 points.")
+
+            # Download buttons
+            dcol1, dcol2 = st.columns(2)
+            with dcol1:
+                with open(output_file, "rb") as f:
+                    st.download_button(
+                        "Download Results (.xlsx)",
+                        data=f,
+                        file_name="osce_results.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+            with dcol2:
+                if os.path.isfile(log_file):
+                    with open(log_file, "rb") as f:
+                        st.download_button(
+                            "Download Log (.log)",
+                            data=f,
+                            file_name="osce_grading.log",
+                            mime="text/plain",
+                        )
 
 
 # =========================================================================
