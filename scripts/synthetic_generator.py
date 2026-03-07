@@ -1110,6 +1110,100 @@ def _parse_rubric_response(text: str, type_id: str) -> SyntheticRubric:
 
 
 # ---------------------------------------------------------------------------
+# Rubric generation / parsing (public API)
+# ---------------------------------------------------------------------------
+
+
+def generate_rubric(
+    type_id: str,
+    llm_caller,
+    *,
+    temperature: float = 0.7,
+    variability: float = 0.5,
+    example_rubric_text: str | None = None,
+) -> SyntheticRubric:
+    """Generate a single rubric for the given assessment type.
+
+    Call this once and pass the result to ``generate_synthetic_session()``
+    so that all sessions share the same rubric (same exam).
+    """
+    meta = _TYPE_META.get(type_id)
+    if meta is None:
+        raise ValueError(f"Unknown assessment type: {type_id}")
+
+    eff_temp = temperature * (0.5 + variability)
+    rubric_messages = _build_rubric_generation_prompt(type_id, example_rubric_text)
+    rubric_response = llm_caller(rubric_messages, eff_temp, 1.0)
+    return _parse_rubric_response(rubric_response, type_id)
+
+
+def parse_supplied_rubric(
+    type_id: str,
+    rubric_text: str,
+    llm_caller,
+) -> SyntheticRubric:
+    """Parse a user-supplied rubric into a :class:`SyntheticRubric`.
+
+    Uses the LLM to **extract** (not generate) the rubric content from
+    *rubric_text* into the structured JSON format expected by the synthetic
+    pipeline.  This lets students respond to the *actual* supplied rubric
+    rather than a synthetically generated one.
+    """
+    meta = _TYPE_META.get(type_id)
+    if meta is None:
+        raise ValueError(f"Unknown assessment type: {type_id}")
+
+    sections_desc = "\n".join(
+        f'- "{sec_key}": {display} (max {max_s} points)'
+        for sec_key, (display, max_s) in meta["sections"].items()
+    )
+
+    system = (
+        "You are a medical education assistant. Extract the rubric content "
+        "from the supplied text into structured JSON. Do NOT invent or "
+        "generate new content — extract what is already present."
+    )
+
+    user = (
+        "Parse the following rubric and extract its content into JSON.\n\n"
+        f"Assessment type: {meta['name']}\n"
+        f"Expected section keys:\n{sections_desc}\n\n"
+        "--- RUBRIC TEXT ---\n"
+        f"{rubric_text}\n"
+        "--- END RUBRIC TEXT ---\n\n"
+        "Extract into this EXACT JSON structure:\n"
+        "{\n"
+        '  "case_title": "the title/header from the rubric",\n'
+        '  "case_description": "the case vignette or scenario description",\n'
+        '  "learner_instructions": "the learner/student instructions if present, '
+        'otherwise empty string",\n'
+        '  "model_answer": "the model answer or resources section if present, '
+        'otherwise empty string",\n'
+        '  "sections": {\n'
+        '    "<section_key>": {\n'
+        '      "criteria": "the full criteria text for this section",\n'
+        '      "score_levels": {"<score>": "descriptor at that level", ...}\n'
+        "    }\n"
+        "  },\n"
+        '  "score_table": [\n'
+        '    {"range": "score range", "milestone": "milestone label"}\n'
+        "  ]\n"
+        "}\n\n"
+        "Use the section keys listed above. Include ALL criteria text, "
+        "score level descriptors, and milestone mappings found in the rubric. "
+        "Respond with ONLY valid JSON."
+    )
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+    response = llm_caller(messages, 0.0, 1.0)
+    return _parse_rubric_response(response, type_id)
+
+
+# ---------------------------------------------------------------------------
 # Session generation orchestrator
 # ---------------------------------------------------------------------------
 
@@ -1121,6 +1215,7 @@ def generate_synthetic_session(
     llm_caller,
     *,
     temperature: float = 0.7,
+    rubric: SyntheticRubric | None = None,
     example_rubric_text: str | None = None,
     example_notes: dict[str, str] | None = None,
     example_scores: dict[int, dict[str, float]] | None = None,
@@ -1143,8 +1238,13 @@ def generate_synthetic_session(
         ``(messages, temperature, top_p) -> str`` LLM call function.
     temperature : float
         Base LLM temperature for generation.
+    rubric : SyntheticRubric, optional
+        Pre-generated rubric to use for this session.  When provided, the
+        rubric generation step is skipped — allowing all sessions to share
+        the same rubric (same exam).
     example_rubric_text : str, optional
-        De-identified rubric text to ground generation.
+        De-identified rubric text to ground generation.  Only used when
+        *rubric* is ``None`` (i.e. the rubric must be generated).
     example_notes : dict, optional
         Example student notes ``{section: text}`` for grounding.
     example_scores : dict, optional
@@ -1164,13 +1264,17 @@ def generate_synthetic_session(
     # Effective temperature scales with variability
     eff_temp = temperature * (0.5 + variability)
 
-    # --- Step 1: Generate rubric ---
-    if progress_callback:
-        progress_callback("Generating rubric", 0, n_students + 2)
+    # --- Step 1: Use provided rubric or generate one ---
+    if rubric is None:
+        if progress_callback:
+            progress_callback("Generating rubric", 0, n_students + 2)
 
-    rubric_messages = _build_rubric_generation_prompt(type_id, example_rubric_text)
-    rubric_response = llm_caller(rubric_messages, eff_temp, 1.0)
-    rubric = _parse_rubric_response(rubric_response, type_id)
+        rubric_messages = _build_rubric_generation_prompt(type_id, example_rubric_text)
+        rubric_response = llm_caller(rubric_messages, eff_temp, 1.0)
+        rubric = _parse_rubric_response(rubric_response, type_id)
+    else:
+        if progress_callback:
+            progress_callback("Using shared rubric", 0, n_students + 2)
 
     # --- Step 2: Generate faculty persona ---
     tendencies = ["lenient", "moderate", "strict"]
