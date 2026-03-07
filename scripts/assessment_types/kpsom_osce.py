@@ -48,16 +48,22 @@ You are a medical education expert grading a student's I-PASS handoff note \
 for a Progress OSCE. You will receive the rubric criteria for one section \
 and the student's response for that section.
 
-Award credit based strictly on the rubric criteria. Use the following scoring:
-- Full credit (1.0 pt): Criterion clearly met
+For CHECKLIST sections (individual items worth specific points):
+- Award credit for each item strictly based on the rubric criteria
+- Full credit (1.0 pt per item): Criterion clearly met
 - Partial credit (0.5 pt): Only where the rubric explicitly allows partial credit
 - No credit (0 pts): Criterion not met
+- Sum all item scores for the section total
+
+For SCALE sections (score-level descriptors like "2: ..., 1: ..., 0: ..."):
+- Match the student's response to the best-fitting score level descriptor
+- Award the corresponding score as the section total
 
 Be generous with terminology: accept clinical synonyms and paraphrasing that \
 convey the same clinical concept. Do not require exact wording.
 
-Provide a one-sentence rationale, then place the numeric score alone on the \
-final line with no other text."""
+Provide a brief rationale for each scored item, then place the numeric total \
+score alone on the final line with no other text."""
 
 MILESTONE_GRADING_PROMPT = """\
 You are a medical education expert grading a student's clinical documentation \
@@ -78,11 +84,21 @@ final line with no other text."""
 
 CHECKLIST_RUBRIC_PARSE_PROMPT = """\
 You are a medical education assistant parsing an OSCE grading rubric.
-Extract the scoring criteria for each section of this I-PASS handoff rubric.
+Extract the complete scoring criteria for each section of this I-PASS handoff rubric.
+
+For checklist sections (Patient Summary, Action List, Situation Awareness), extract \
+every individual checklist item with its point value and any partial credit conditions.
+For scale sections (Illness Severity, Organization), extract the score level descriptors.
+
 Return ONLY valid JSON:
-{"section_name": {"criteria": "full criteria text", "max_score": <number>}}
-Sections to extract: Illness Severity, Patient Summary, Action List, \
-Situation Awareness, Organization"""
+{"section_name": {"criteria": "full criteria text with ALL items", "max_score": <number>}}
+
+In the "criteria" field, include EVERY scorable item, one per line:
+- Checklist: "- [Item description]: 1 pt (partial: 0.5 pt if [condition])\\n- [Next item]: 1 pt\\n..."
+- Scale: "2: [descriptor]\\n1: [descriptor]\\n0: [descriptor]"
+
+Sections to extract: illness_severity, patient_summary, action_list, \
+situation_awareness, organization"""
 
 MILESTONE_RUBRIC_PARSE_PROMPT = """\
 You are a medical education assistant parsing an OSCE grading rubric.
@@ -403,6 +419,10 @@ class KPSOMBaseType(AssessmentType):
         df = _map_columns(df, self._column_map)
 
         rubric_data: dict = {"rubric_path": file_paths.get("rubric")}
+
+        # Pass through rubric_id for direct DB lookup (skips LLM parsing)
+        if "rubric_id" in file_paths:
+            rubric_data["rubric_id"] = file_paths["rubric_id"]
 
         scores_path = file_paths.get("scores")
         if scores_path:
