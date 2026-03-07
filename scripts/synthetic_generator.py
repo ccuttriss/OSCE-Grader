@@ -38,6 +38,9 @@ class SyntheticRubric:
     case_title: str
     case_description: str
     sections: dict[str, SectionRubric]
+    learner_instructions: str = ""
+    model_answer: str = ""
+    score_table: list[tuple[str, str]] = field(default_factory=list)  # [(range, milestone), ...]
 
 
 @dataclass
@@ -48,6 +51,7 @@ class SectionRubric:
     max_score: int | float
     criteria: str
     score_levels: dict[int, str]  # score -> descriptor text
+    checklist_items: list[dict[str, str]] = field(default_factory=list)  # [{"item": ..., "points": ..., "partial": ...}]
 
 
 @dataclass
@@ -280,11 +284,143 @@ def _generate_faculty_persona(
 # Prompt builders
 # ---------------------------------------------------------------------------
 
+def _build_ipass_rubric_generation_prompt(
+    example_rubric_text: str | None = None,
+) -> list[dict[str, str]]:
+    """Build prompt for generating an I-PASS handoff rubric with correct structure.
+
+    I-PASS rubrics use checklist scoring (individual binary/partial-credit items)
+    for most sections, NOT scale-based score levels.
+    """
+    example_block = ""
+    if example_rubric_text:
+        example_block = (
+            "\n\nHere is a de-identified example rubric from a real administration. "
+            "Use this as a template for tone, detail level, and scoring criteria "
+            "structure. Generate NEW clinical content — do NOT copy verbatim:\n\n"
+            f"--- EXAMPLE RUBRIC ---\n{example_rubric_text}\n--- END EXAMPLE ---\n"
+        )
+
+    system = (
+        "You are a medical education assessment design expert specializing in "
+        "I-PASS handoff assessments. Generate a detailed, realistic OSCE grading "
+        "rubric that mirrors the structure used at KPSOM for Progress OSCEs."
+    )
+
+    user = (
+        "Generate a complete KPSOM I-PASS Handoff rubric for a Progress OSCE.\n\n"
+        "IMPORTANT STRUCTURAL REQUIREMENTS:\n\n"
+        "1. **Peri-encounter Task Title**: A short title like "
+        "'Peri-encounter Task: I-PASS Transitions of Care'\n\n"
+        "2. **Learner Instructions**: Detailed paragraph(s) telling the student:\n"
+        "   - The clinical situation they are in (what happened, what was done)\n"
+        "   - The specific task (compose a written sign-out using I-PASS framework)\n"
+        "   - Any notes about which I-PASS sections to include/omit\n\n"
+        "3. **Model Answer**: A complete example of a top-scoring I-PASS handoff "
+        "note, organized into the I-PASS sections (Illness Severity, Patient "
+        "Summary, Action List, Situation Awareness & Contingency Planning, "
+        "Synthesis by Receiver). This should be detailed and clinically accurate.\n\n"
+        "4. **Case Description**: A 2-4 sentence clinical vignette describing "
+        "the patient scenario.\n\n"
+        "5. **Sections** — each section uses a SPECIFIC scoring format:\n\n"
+        "   a) **Illness Severity** (2 pts total) — SCALE-BASED:\n"
+        "      - 2 pts: Correctly identifies patient as watcher\n"
+        "      - 1 pt: Indicates patient is acutely ill but uses wrong terminology\n"
+        "      - 0 pts: Identifies patient as stable or omits severity\n\n"
+        "   b) **Patient Summary** (14 pts total) — CHECKLIST of ~14 individual "
+        "items, each worth 1 pt. Some items allow 0.5 pt partial credit. "
+        "Example items from a real rubric:\n"
+        "      - Age + gender: 1 pt\n"
+        "      - Post-op status/presenting complaint: 1 pt\n"
+        "      - PMH (full: 1 pt; partial: 0.5 pt)\n"
+        "      - Key vital signs (e.g., Fever + tachycardia: 1 pt; only one: 0.5 pt)\n"
+        "      - Key lab results: 1 pt each\n"
+        "      - Diagnosis/clinical impression: 1 pt\n"
+        "      - Treatments initiated: 1 pt each\n"
+        "      The items must total exactly 14 points at full credit.\n\n"
+        "   c) **Action List** (5 pts total) — CHECKLIST of ~4-5 specific action "
+        "items, each worth 1 pt. Include a bonus note: 'May receive 1 pt for any "
+        "other reasonable treatment/management option, not to exceed 5 pts total.'\n\n"
+        "   d) **Situation Awareness & Contingency Planning** (3 pts total) — "
+        "CHECKLIST of 2 specific contingency items (1 pt each) plus '1 additional "
+        "pt for any other reasonable contingency plan.'\n\n"
+        "   e) **Overall Organization** (3 pts total) — SCALE-BASED:\n"
+        "      - Sign-out clearly separated into 4 sections (I, P, A, S): 1 pt\n"
+        "      - Information organized into appropriate sections and prioritized: "
+        "2 pts; minor issues: 1 pt; disorganized: 0 pts\n\n"
+        "6. **Score Table**: Total score to milestone mapping. Use these EXACT "
+        "milestone labels and provide 7-8 ranges covering 0–27:\n"
+        "   Aspirational, Advanced Developing to Aspirational, Advanced Developing, "
+        "   Mid-Developing to Advanced Developing, Mid-Developing, "
+        "   Early Developing to Mid-Developing, Early Developing\n"
+        f"{example_block}\n"
+        "Respond with ONLY valid JSON using this EXACT structure:\n"
+        "{\n"
+        '  "case_title": "KPSOM I-PASS Handoff: <brief clinical title>",\n'
+        '  "case_description": "<2-4 sentence clinical vignette>",\n'
+        '  "learner_instructions": "<detailed instructions for the student>",\n'
+        '  "model_answer": "<complete model I-PASS handoff note>",\n'
+        '  "sections": {\n'
+        '    "illness_severity": {\n'
+        '      "criteria": "<what this section assesses>",\n'
+        '      "score_levels": {"2": "...", "1": "...", "0": "..."}\n'
+        "    },\n"
+        '    "patient_summary": {\n'
+        '      "criteria": "<what this section assesses>",\n'
+        '      "checklist_items": [\n'
+        '        {"item": "<clinical element>", "points": "1", "partial": null},\n'
+        '        {"item": "<element with partial>", "points": "1", '
+        '"partial": "<condition for 0.5 pt>"}\n'
+        "      ]\n"
+        "    },\n"
+        '    "action_list": {\n'
+        '      "criteria": "<what this section assesses>",\n'
+        '      "checklist_items": [\n'
+        '        {"item": "<action item>", "points": "1", "partial": null}\n'
+        "      ],\n"
+        '      "bonus_note": "May receive 1 pt for any other reasonable '
+        'action, not to exceed 5 pts total for section"\n'
+        "    },\n"
+        '    "situation_awareness": {\n'
+        '      "criteria": "<what this section assesses>",\n'
+        '      "checklist_items": [\n'
+        '        {"item": "<contingency scenario>", "points": "1", "partial": null}\n'
+        "      ],\n"
+        '      "bonus_note": "1 additional pt for any other reasonable '
+        'contingency plan"\n'
+        "    },\n"
+        '    "organization": {\n'
+        '      "criteria": "<what this section assesses>",\n'
+        '      "score_levels": {"3": "...", "2": "...", "1": "...", "0": "..."}\n'
+        "    }\n"
+        "  },\n"
+        '  "score_table": [\n'
+        '    {"range": "26-27", "milestone": "Aspirational"},\n'
+        '    {"range": "24-25", "milestone": "Advanced Developing to Aspirational"},\n'
+        '    {"range": "18-23", "milestone": "Advanced Developing"},\n'
+        '    {"range": "16-17", "milestone": "Mid-Developing to Advanced Developing"},\n'
+        '    {"range": "14-15", "milestone": "Mid-Developing"},\n'
+        '    {"range": "12-13", "milestone": "Early Developing to Mid-Developing"},\n'
+        '    {"range": "0-11", "milestone": "Early Developing"}\n'
+        "  ]\n"
+        "}"
+    )
+
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
 def _build_rubric_generation_prompt(
     type_id: str,
     example_rubric_text: str | None = None,
 ) -> list[dict[str, str]]:
     """Build prompt for generating a detailed rubric."""
+    # Dispatch to type-specific prompt builders
+    if type_id == "kpsom_ipass":
+        return _build_ipass_rubric_generation_prompt(example_rubric_text)
+
     meta = _TYPE_META[type_id]
     sections_desc = "\n".join(
         f"- **{display}** (max {max_s} points)"
@@ -348,6 +484,11 @@ def _build_student_note_prompt(
     meta = _TYPE_META[type_id]
 
     rubric_text = f"Case: {rubric.case_title}\n{rubric.case_description}\n\n"
+
+    # Include learner instructions if available (tells student what to do)
+    if rubric.learner_instructions:
+        rubric_text += f"TASK INSTRUCTIONS:\n{rubric.learner_instructions}\n\n"
+
     for sec_key, sec_rubric in rubric.sections.items():
         rubric_text += (
             f"## {sec_rubric.display_name} (max {sec_rubric.max_score} pts)\n"
@@ -510,6 +651,8 @@ def _parse_rubric_response(text: str, type_id: str) -> SyntheticRubric:
     raw_sections = data.get("sections", {})
     for sec_key, (display, max_s) in meta["sections"].items():
         sec_data = raw_sections.get(sec_key, {})
+
+        # Parse score_levels (scale-based sections)
         score_levels = {}
         raw_levels = sec_data.get("score_levels", {})
         for k, v in raw_levels.items():
@@ -518,19 +661,50 @@ def _parse_rubric_response(text: str, type_id: str) -> SyntheticRubric:
             except (ValueError, TypeError):
                 pass
 
+        # Parse checklist_items (checklist-based sections like Patient Summary)
+        checklist_items = []
+        raw_items = sec_data.get("checklist_items", [])
+        for item in raw_items:
+            if isinstance(item, dict):
+                checklist_items.append({
+                    "item": str(item.get("item", "")),
+                    "points": str(item.get("points", "1")),
+                    "partial": str(item["partial"]) if item.get("partial") else None,
+                })
+
+        # Append bonus_note to criteria if present
+        criteria = sec_data.get("criteria", "")
+        bonus_note = sec_data.get("bonus_note")
+        if bonus_note:
+            criteria = f"{criteria}\n({bonus_note})"
+
         sections[sec_key] = SectionRubric(
             section_key=sec_key,
             display_name=display,
             max_score=max_s,
-            criteria=sec_data.get("criteria", ""),
+            criteria=criteria,
             score_levels=score_levels,
+            checklist_items=checklist_items,
         )
+
+    # Parse score_table
+    score_table = []
+    raw_table = data.get("score_table", [])
+    for entry in raw_table:
+        if isinstance(entry, dict):
+            score_table.append((
+                str(entry.get("range", "")),
+                str(entry.get("milestone", "")),
+            ))
 
     return SyntheticRubric(
         assessment_type_id=type_id,
         case_title=data.get("case_title", "Synthetic Case"),
         case_description=data.get("case_description", ""),
         sections=sections,
+        learner_instructions=data.get("learner_instructions", ""),
+        model_answer=data.get("model_answer", ""),
+        score_table=score_table,
     )
 
 
@@ -739,13 +913,51 @@ def rubric_to_display_text(rubric: SyntheticRubric) -> str:
         f"# {rubric.case_title}",
         f"\n{rubric.case_description}\n",
     ]
+
+    # Learner instructions
+    if rubric.learner_instructions:
+        lines.append("\n## Learner Instructions")
+        lines.append(rubric.learner_instructions)
+        lines.append("")
+
+    # Model answer
+    if rubric.model_answer:
+        lines.append("\n## Model Answer")
+        lines.append(rubric.model_answer)
+        lines.append("")
+
+    # Grading rubric sections
+    lines.append("\n## Grading Rubric\n")
     for sec_key, sec in rubric.sections.items():
-        lines.append(f"\n## {sec.display_name} (max {sec.max_score} pts)")
+        lines.append(f"\n### {sec.display_name} ({sec.max_score} pts total)")
         lines.append(sec.criteria)
+
+        # Checklist-based sections (e.g., Patient Summary, Action List)
+        if sec.checklist_items:
+            lines.append("")
+            for item in sec.checklist_items:
+                partial = item.get("partial")
+                if partial:
+                    lines.append(
+                        f"- {item['item']}: {item['points']} pt; {partial}"
+                    )
+                else:
+                    lines.append(f"- {item['item']}: {item['points']} pt")
+
+        # Scale-based sections (e.g., Illness Severity, Organization)
         if sec.score_levels:
             lines.append("\n**Score Levels:**\n")
             for level in sorted(sec.score_levels.keys(), reverse=True):
                 lines.append(f"**{level}:** {sec.score_levels[level]}\n")
+
+    # Score table
+    if rubric.score_table:
+        lines.append("\n## Score Table\n")
+        lines.append("| Total Score | Milestone |")
+        lines.append("|-------------|-----------|")
+        for score_range, milestone in rubric.score_table:
+            lines.append(f"| {score_range} | {milestone} |")
+
     return "\n".join(lines)
 
 
@@ -776,13 +988,49 @@ def rubric_to_excel(rubric: SyntheticRubric, type_id: str) -> bytes:
         ws.append(row)
     else:
         # KPSOM types: .docx-style rubric exported as structured Excel
-        ws.append(["Section", "Criteria", "Max Score", "Score Levels"])
+        # Add learner instructions if present
+        if rubric.learner_instructions:
+            ws.append(["Learner Instructions"])
+            ws.append([rubric.learner_instructions])
+            ws.append([])  # blank row separator
+
+        # Add model answer if present
+        if rubric.model_answer:
+            ws.append(["Model Answer"])
+            ws.append([rubric.model_answer])
+            ws.append([])  # blank row separator
+
+        ws.append(["Section", "Criteria", "Max Score", "Score Levels / Checklist"])
         for sec_key, sec in rubric.sections.items():
-            levels_text = "\n".join(
-                f"{lvl}: {desc}"
-                for lvl, desc in sorted(sec.score_levels.items(), reverse=True)
-            )
-            ws.append([sec.display_name, sec.criteria, sec.max_score, levels_text])
+            # Build scoring details text
+            if sec.checklist_items:
+                # Checklist-based section
+                items_lines = []
+                for item in sec.checklist_items:
+                    partial = item.get("partial")
+                    if partial:
+                        items_lines.append(
+                            f"{item['item']}: {item['points']} pt; {partial}"
+                        )
+                    else:
+                        items_lines.append(f"{item['item']}: {item['points']} pt")
+                scoring_text = "\n".join(items_lines)
+            elif sec.score_levels:
+                # Scale-based section
+                scoring_text = "\n".join(
+                    f"{lvl}: {desc}"
+                    for lvl, desc in sorted(sec.score_levels.items(), reverse=True)
+                )
+            else:
+                scoring_text = ""
+            ws.append([sec.display_name, sec.criteria, sec.max_score, scoring_text])
+
+        # Add score table if present
+        if rubric.score_table:
+            ws.append([])  # blank row separator
+            ws.append(["Total Score", "Milestone"])
+            for score_range, milestone in rubric.score_table:
+                ws.append([score_range, milestone])
 
     buf = io.BytesIO()
     wb.save(buf)
