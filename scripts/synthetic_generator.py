@@ -743,9 +743,9 @@ def rubric_to_display_text(rubric: SyntheticRubric) -> str:
         lines.append(f"\n## {sec.display_name} (max {sec.max_score} pts)")
         lines.append(sec.criteria)
         if sec.score_levels:
-            lines.append("\n**Score Levels:**")
+            lines.append("\n**Score Levels:**\n")
             for level in sorted(sec.score_levels.keys(), reverse=True):
-                lines.append(f"  **{level}**: {sec.score_levels[level]}")
+                lines.append(f"**{level}:** {sec.score_levels[level]}\n")
     return "\n".join(lines)
 
 
@@ -778,7 +778,7 @@ def rubric_to_excel(rubric: SyntheticRubric, type_id: str) -> bytes:
         # KPSOM types: .docx-style rubric exported as structured Excel
         ws.append(["Section", "Criteria", "Max Score", "Score Levels"])
         for sec_key, sec in rubric.sections.items():
-            levels_text = "; ".join(
+            levels_text = "\n".join(
                 f"{lvl}: {desc}"
                 for lvl, desc in sorted(sec.score_levels.items(), reverse=True)
             )
