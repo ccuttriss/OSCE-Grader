@@ -49,21 +49,25 @@ for a Progress OSCE. You will receive the rubric criteria for one section \
 and the student's response for that section.
 
 For CHECKLIST sections (individual items worth specific points):
-- Award credit for each item strictly based on the rubric criteria
-- Full credit (1.0 pt per item): Criterion clearly met
-- Partial credit (0.5 pt): Only where the rubric explicitly allows partial credit
-- No credit (0 pts): Criterion not met
-- Sum all item scores for the section total
+- Go through EACH checklist item one by one
+- For each item, check if the student's response addresses that clinical element
+- Full credit (1.0 pt): The clinical concept is clearly present in the response
+- Partial credit (0.5 pt): Only where the rubric explicitly allows partial credit \
+AND the partial condition is met
+- No credit (0 pts): The clinical concept is absent or incorrect
+- After scoring each item, SUM all awarded points for the section total
+- Students may use different terminology or phrasing — accept clinical synonyms
 
 For SCALE sections (score-level descriptors like "2: ..., 1: ..., 0: ..."):
 - Match the student's response to the best-fitting score level descriptor
 - Award the corresponding score as the section total
 
 Be generous with terminology: accept clinical synonyms and paraphrasing that \
-convey the same clinical concept. Do not require exact wording.
+convey the same clinical concept. Do not require exact wording from the rubric.
 
-Provide a brief rationale for each scored item, then place the numeric total \
-score alone on the final line with no other text."""
+Format your response as:
+1. For each rubric item, write: "- [item name]: [score] — [brief rationale]"
+2. On the FINAL line, write ONLY the numeric total score (nothing else)."""
 
 MILESTONE_GRADING_PROMPT = """\
 You are a medical education expert grading a student's clinical documentation \
@@ -443,7 +447,7 @@ class KPSOMBaseType(AssessmentType):
         student_response: str,
         rubric_data: dict,
     ) -> str:
-        # Include rubric criteria if available from LLM parsing
+        # Include rubric criteria if available from DB or LLM parsing
         parsed_rubric = rubric_data.get("parsed_rubric", {})
         section_rubric = parsed_rubric.get(section, {})
         criteria = section_rubric.get("criteria", "No specific criteria available.")
@@ -451,9 +455,20 @@ class KPSOMBaseType(AssessmentType):
             "max_score", self._sections.get(section, "N/A")
         )
 
+        # Indicate scoring type so the LLM uses the right approach
+        checklist_items = section_rubric.get("checklist_items", [])
+        score_levels = section_rubric.get("score_levels", {})
+        if checklist_items:
+            scoring_type = "CHECKLIST (score each item individually and sum)"
+        elif score_levels:
+            scoring_type = "SCALE (match response to the best-fitting level)"
+        else:
+            scoring_type = "See criteria below"
+
         return (
             f"Section: {section}\n"
             f"Maximum score for this section: {max_score}\n"
+            f"Scoring type: {scoring_type}\n"
             f"Rubric criteria:\n{criteria}\n\n"
             f"Student response:\n{student_response}"
         )

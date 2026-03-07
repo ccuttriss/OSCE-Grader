@@ -405,6 +405,15 @@ def process_assessment(
     if rubric_id:
         from database import get_rubric_sections_as_parsed
         rubric_data["parsed_rubric"] = get_rubric_sections_as_parsed(rubric_id)
+        for sec_key, sec_data in rubric_data["parsed_rubric"].items():
+            has_checklist = bool(sec_data.get("checklist_items"))
+            has_levels = bool(sec_data.get("score_levels"))
+            criteria_preview = sec_data.get("criteria", "")[:80]
+            logger.info(
+                "  Section %s: max=%s checklist=%s levels=%s criteria=%s...",
+                sec_key, sec_data.get("max_score"), has_checklist, has_levels,
+                criteria_preview,
+            )
         logger.info(
             "Rubric loaded from database (id=%s). Sections: %s",
             rubric_id, list(rubric_data["parsed_rubric"].keys()),
@@ -445,6 +454,12 @@ def process_assessment(
             )
         rubric_data["parsed_rubric"] = parsed_rubric
         logger.info("Rubric parsed. Sections found: %s", list(parsed_rubric.keys()))
+    else:
+        logger.warning(
+            "No rubric loaded! rubric_id=%s, rubric_path=%s. "
+            "Grading will use generic criteria.",
+            rubric_id, rubric_data.get("rubric_path"),
+        )
 
     # --- Faculty scores lookup ---
     # Support two patterns:
