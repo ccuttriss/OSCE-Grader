@@ -5,3 +5,5 @@
 __pycache__/
 *.log
 *.env
+synthetic_data/
+uploads_tmp/
