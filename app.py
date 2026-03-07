@@ -777,30 +777,9 @@ def tab_grade_notes():
 
             st.session_state["results_df"] = df
             st.session_state["results_sections"] = sections
-
-            stats = compute_summary_stats(df, sections)
-            if stats:
-                st.subheader("Summary Statistics")
-                st.dataframe(pd.DataFrame(stats), use_container_width=True)
-
-            dcol1, dcol2 = st.columns(2)
-            with dcol1:
-                with open(output_file, "rb") as f:
-                    st.download_button(
-                        "Download Results (.xlsx)",
-                        data=f,
-                        file_name="osce_results.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
-            with dcol2:
-                if os.path.isfile(log_file):
-                    with open(log_file, "rb") as f:
-                        st.download_button(
-                            "Download Log (.log)",
-                            data=f,
-                            file_name="osce_grading.log",
-                            mime="text/plain",
-                        )
+            st.session_state["results_is_uk"] = True
+            st.session_state["results_output_file"] = output_file
+            st.session_state["results_log_file"] = log_file
 
         else:
             # ---- KPSOM grading path ----
@@ -841,50 +820,66 @@ def tab_grade_notes():
 
             st.session_state["results_df"] = result_df
             st.session_state["results_sections"] = sections
+            st.session_state["results_is_uk"] = False
+            st.session_state["results_output_file"] = output_file
+            st.session_state["results_log_file"] = log_file
 
-            # --- KPSOM Results Display ---
-            if not result_df.empty:
-                # Score summary table
-                st.subheader("Score Summary")
-                summary_rows = []
-                for sec in sections:
-                    ai_col = f"{sec}_ai_score"
-                    fac_col = f"{sec}_faculty_score"
-                    row_data = {"Section": sec.upper().replace("_", " ")}
-                    if ai_col in result_df.columns:
-                        ai_scores = pd.to_numeric(result_df[ai_col], errors="coerce").dropna()
-                        row_data["AI Mean"] = round(ai_scores.mean(), 2) if len(ai_scores) > 0 else None
-                    if fac_col in result_df.columns:
-                        fac_scores = pd.to_numeric(result_df[fac_col], errors="coerce").dropna()
-                        row_data["Faculty Mean"] = round(fac_scores.mean(), 2) if len(fac_scores) > 0 else None
-                    delta_col = f"{sec}_delta"
-                    if delta_col in result_df.columns:
-                        deltas = pd.to_numeric(result_df[delta_col], errors="coerce").dropna()
-                        row_data["Mean Delta"] = round(deltas.mean(), 2) if len(deltas) > 0 else None
-                    summary_rows.append(row_data)
-                st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+    # --- Display results (persists across Streamlit reruns) ---
+    if "results_df" in st.session_state:
+        result_df = st.session_state["results_df"]
+        sections = st.session_state["results_sections"]
+        results_is_uk = st.session_state.get("results_is_uk", False)
+        output_file = st.session_state.get("results_output_file", "")
+        log_file = st.session_state.get("results_log_file", "")
 
-                # Milestone distribution
-                if "ai_milestone" in result_df.columns:
-                    st.subheader("Milestone Distribution")
-                    milestone_counts = result_df["ai_milestone"].value_counts()
-                    st.dataframe(milestone_counts.reset_index().rename(
-                        columns={"index": "Milestone", "ai_milestone": "Milestone", "count": "Count"}
-                    ), use_container_width=True, hide_index=True)
+        if results_is_uk:
+            stats = compute_summary_stats(result_df, sections)
+            if stats:
+                st.subheader("Summary Statistics")
+                st.dataframe(pd.DataFrame(stats), use_container_width=True)
+        elif not result_df.empty:
+            # Score summary table
+            st.subheader("Score Summary")
+            summary_rows = []
+            for sec in sections:
+                ai_col = f"{sec}_ai_score"
+                fac_col = f"{sec}_faculty_score"
+                row_data = {"Section": sec.upper().replace("_", " ")}
+                if ai_col in result_df.columns:
+                    ai_scores = pd.to_numeric(result_df[ai_col], errors="coerce").dropna()
+                    row_data["AI Mean"] = round(ai_scores.mean(), 2) if len(ai_scores) > 0 else None
+                if fac_col in result_df.columns:
+                    fac_scores = pd.to_numeric(result_df[fac_col], errors="coerce").dropna()
+                    row_data["Faculty Mean"] = round(fac_scores.mean(), 2) if len(fac_scores) > 0 else None
+                delta_col = f"{sec}_delta"
+                if delta_col in result_df.columns:
+                    deltas = pd.to_numeric(result_df[delta_col], errors="coerce").dropna()
+                    row_data["Mean Delta"] = round(deltas.mean(), 2) if len(deltas) > 0 else None
+                summary_rows.append(row_data)
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
-                # Faculty comparison
-                if "faculty_total" in result_df.columns and "ai_total" in result_df.columns:
-                    with st.expander("Faculty vs AI Comparison (delta > 2 points)"):
-                        comparison = result_df[["student_id", "ai_total", "faculty_total", "total_delta"]].copy()
-                        comparison = comparison.dropna(subset=["total_delta"])
-                        outliers = comparison[comparison["total_delta"].abs() > 2]
-                        if len(outliers) > 0:
-                            st.dataframe(outliers, use_container_width=True, hide_index=True)
-                        else:
-                            st.success("No students differ by more than 2 points.")
+            # Milestone distribution
+            if "ai_milestone" in result_df.columns:
+                st.subheader("Milestone Distribution")
+                milestone_counts = result_df["ai_milestone"].value_counts()
+                st.dataframe(milestone_counts.reset_index().rename(
+                    columns={"index": "Milestone", "ai_milestone": "Milestone", "count": "Count"}
+                ), use_container_width=True, hide_index=True)
 
-            # Download buttons
-            dcol1, dcol2 = st.columns(2)
+            # Faculty comparison
+            if "faculty_total" in result_df.columns and "ai_total" in result_df.columns:
+                with st.expander("Faculty vs AI Comparison (delta > 2 points)"):
+                    comparison = result_df[["student_id", "ai_total", "faculty_total", "total_delta"]].copy()
+                    comparison = comparison.dropna(subset=["total_delta"])
+                    outliers = comparison[comparison["total_delta"].abs() > 2]
+                    if len(outliers) > 0:
+                        st.dataframe(outliers, use_container_width=True, hide_index=True)
+                    else:
+                        st.success("No students differ by more than 2 points.")
+
+        # Download buttons
+        dcol1, dcol2 = st.columns(2)
+        if output_file and os.path.isfile(output_file):
             with dcol1:
                 with open(output_file, "rb") as f:
                     st.download_button(
@@ -893,15 +888,15 @@ def tab_grade_notes():
                         file_name="osce_results.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
+        if log_file and os.path.isfile(log_file):
             with dcol2:
-                if os.path.isfile(log_file):
-                    with open(log_file, "rb") as f:
-                        st.download_button(
-                            "Download Log (.log)",
-                            data=f,
-                            file_name="osce_grading.log",
-                            mime="text/plain",
-                        )
+                with open(log_file, "rb") as f:
+                    st.download_button(
+                        "Download Log (.log)",
+                        data=f,
+                        file_name="osce_grading.log",
+                        mime="text/plain",
+                    )
 
 
 # =========================================================================
