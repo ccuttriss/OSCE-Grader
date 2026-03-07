@@ -1037,6 +1037,47 @@ def rubric_to_excel(rubric: SyntheticRubric, type_id: str) -> bytes:
     return buf.getvalue()
 
 
+def rubric_to_docx(rubric: SyntheticRubric) -> bytes:
+    """Export rubric as a .docx file suitable for the KPSOM parsing pipeline."""
+    from docx import Document
+
+    doc = Document()
+    doc.add_heading(rubric.case_title or "Rubric", level=1)
+
+    if rubric.learner_instructions:
+        doc.add_heading("Learner Instructions", level=2)
+        doc.add_paragraph(rubric.learner_instructions)
+
+    for sec_key, sec in rubric.sections.items():
+        doc.add_heading(sec.display_name, level=2)
+        doc.add_paragraph(f"Max Score: {sec.max_score}")
+        if sec.criteria:
+            doc.add_paragraph(sec.criteria)
+        if sec.checklist_items:
+            for item in sec.checklist_items:
+                partial = item.get("partial", "")
+                line = f"{item['item']}: {item['points']} pt"
+                if partial:
+                    line += f"; {partial}"
+                doc.add_paragraph(line, style="List Bullet")
+        elif sec.score_levels:
+            for lvl, desc in sorted(sec.score_levels.items(), reverse=True):
+                doc.add_paragraph(f"{lvl}: {desc}", style="List Bullet")
+
+    if rubric.model_answer:
+        doc.add_heading("Model Answer", level=2)
+        doc.add_paragraph(rubric.model_answer)
+
+    if rubric.score_table:
+        doc.add_heading("Score Table", level=2)
+        for score_range, milestone in rubric.score_table:
+            doc.add_paragraph(f"{score_range}: {milestone}")
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
 def answer_key_to_excel(rubric: SyntheticRubric, type_id: str) -> bytes:
     """Export an answer key derived from the rubric's top-level criteria."""
     meta = _TYPE_META[type_id]

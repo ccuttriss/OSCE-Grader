@@ -61,6 +61,7 @@ from synthetic_generator import (
     generate_synthetic_session,
     rubric_to_display_text,
     rubric_to_excel,
+    rubric_to_docx,
     answer_key_to_excel,
     student_notes_to_excel,
     faculty_scores_to_excel,
@@ -264,6 +265,92 @@ def _remove_example(type_id: str, slot: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Persistent synthetic data storage per assessment type
+# ---------------------------------------------------------------------------
+import shutil
+
+SYNTHETIC_DATA_DIR = os.path.join(REPO_ROOT, "synthetic_data")
+
+
+def _synth_type_dir(type_id: str) -> str:
+    """Return the persistent synthetic-data directory for a given type."""
+    d = os.path.join(SYNTHETIC_DATA_DIR, type_id)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _save_synthetic_session(session, type_id: str) -> None:
+    """Save a synthetic session's files to disk, replacing any previous data."""
+    d = _synth_type_dir(type_id)
+    # Clear existing files
+    for fname in os.listdir(d):
+        os.remove(os.path.join(d, fname))
+
+    is_uk = type_id == "uk_osce"
+
+    # Rubric: save as .xlsx always, plus .docx for KPSOM types
+    with open(os.path.join(d, "rubric.xlsx"), "wb") as f:
+        f.write(rubric_to_excel(session.rubric, type_id))
+
+    if not is_uk:
+        with open(os.path.join(d, "rubric.docx"), "wb") as f:
+            f.write(rubric_to_docx(session.rubric))
+
+    if is_uk:
+        with open(os.path.join(d, "answer_key.xlsx"), "wb") as f:
+            f.write(answer_key_to_excel(session.rubric, type_id))
+
+    with open(os.path.join(d, "student_notes.xlsx"), "wb") as f:
+        f.write(student_notes_to_excel(session))
+
+    with open(os.path.join(d, "faculty_scores.xlsx"), "wb") as f:
+        f.write(faculty_scores_to_excel(session))
+
+    # Readable rubric text
+    with open(os.path.join(d, "rubric.txt"), "w") as f:
+        f.write(rubric_to_display_text(session.rubric))
+
+
+def _has_synthetic_data(type_id: str) -> bool:
+    """Check if synthetic data files exist for a given type."""
+    d = os.path.join(SYNTHETIC_DATA_DIR, type_id)
+    if not os.path.isdir(d):
+        return False
+    return os.path.isfile(os.path.join(d, "student_notes.xlsx"))
+
+
+def _get_synthetic_files(type_id: str) -> dict[str, str] | None:
+    """Return file paths for saved synthetic data, or None if missing."""
+    d = os.path.join(SYNTHETIC_DATA_DIR, type_id)
+    if not _has_synthetic_data(type_id):
+        return None
+
+    is_uk = type_id == "uk_osce"
+    files = {
+        "responses": os.path.join(d, "student_notes.xlsx"),
+    }
+    if is_uk:
+        files["rubric"] = os.path.join(d, "rubric.xlsx")
+        files["answer_key"] = os.path.join(d, "answer_key.xlsx")
+    else:
+        files["rubric"] = os.path.join(d, "rubric.docx")
+        files["scores"] = os.path.join(d, "faculty_scores.xlsx")
+
+    # Verify all files exist
+    for path in files.values():
+        if not os.path.isfile(path):
+            return None
+    return files
+
+
+def _delete_synthetic_data(type_id: str) -> None:
+    """Delete all saved synthetic data for a given type."""
+    d = os.path.join(SYNTHETIC_DATA_DIR, type_id)
+    if os.path.isdir(d):
+        shutil.rmtree(d)
+
+
+# ---------------------------------------------------------------------------
 # Helper: detect section columns from a DataFrame
 # ---------------------------------------------------------------------------
 def _detect_sections(df: pd.DataFrame) -> list[str]:
@@ -298,47 +385,89 @@ def tab_grade_notes():
 
     st.divider()
 
-    # --- Dynamic file uploads ---
+    # --- Data source selector ---
+    has_synth = _has_synthetic_data(selected_type_id)
+    use_synthetic = False
+
+    if has_synth:
+        source_options = ["Upload files", "Use Synthetic Data"]
+        data_source = st.radio(
+            "Data source",
+            source_options,
+            key="grade_data_source",
+            horizontal=True,
+        )
+        use_synthetic = data_source == "Use Synthetic Data"
+
+        if use_synthetic:
+            synth_files = _get_synthetic_files(selected_type_id)
+            if synth_files:
+                st.success(
+                    "Using saved synthetic data. Files: "
+                    + ", ".join(f"**{k}** ({os.path.basename(v)})" for k, v in synth_files.items())
+                )
+                # Preview synthetic student notes
+                with st.expander("Synthetic student notes preview", expanded=False):
+                    try:
+                        df_preview = pd.read_excel(synth_files["responses"])
+                        st.dataframe(df_preview.head(5), use_container_width=True)
+                    except Exception:
+                        st.warning("Could not preview synthetic notes.")
+
+                if st.button(
+                    "Delete synthetic data for this type",
+                    key="grade_delete_synth",
+                    type="secondary",
+                ):
+                    _delete_synthetic_data(selected_type_id)
+                    st.rerun()
+            else:
+                st.error("Synthetic data files are incomplete. Please regenerate.")
+                use_synthetic = False
+
+    # --- Dynamic file uploads (shown when not using synthetic data) ---
     required_files = assessment_type.get_required_files()
     uploaded_files = {}
-    file_cols = st.columns(len(required_files))
-    for i, file_spec in enumerate(required_files):
-        with file_cols[i]:
-            label = file_spec["label"]
-            if not file_spec.get("required", True):
-                label += " (optional)"
-            uploaded_files[file_spec["key"]] = st.file_uploader(
-                label,
-                type=file_spec["types"],
-                key=f"upload_{file_spec['key']}",
-            )
-
-    # --- Previews ---
-    for file_spec in required_files:
-        fkey = file_spec["key"]
-        uf = uploaded_files.get(fkey)
-        if uf and file_spec["types"] == ["xlsx"]:
-            with st.expander(f"{file_spec['label']} preview", expanded=False):
-                try:
-                    df_preview = pd.read_excel(uf)
-                    st.dataframe(df_preview.head(5), use_container_width=True)
-                except Exception:
-                    st.warning("Could not preview this file.")
-                uf.seek(0)
-
-    # UK-specific section detection
     detected_sections = []
-    if is_uk:
-        notes_uf = uploaded_files.get("responses")
-        if notes_uf:
-            try:
-                df_n = pd.read_excel(notes_uf)
-                detected_sections = _detect_sections(df_n)
-                if detected_sections:
-                    st.info(f"Detected sections: **{', '.join(s.upper() for s in detected_sections)}**")
-                notes_uf.seek(0)
-            except Exception:
-                pass
+
+    if not use_synthetic:
+        file_cols = st.columns(len(required_files))
+        for i, file_spec in enumerate(required_files):
+            with file_cols[i]:
+                label = file_spec["label"]
+                if not file_spec.get("required", True):
+                    label += " (optional)"
+                uploaded_files[file_spec["key"]] = st.file_uploader(
+                    label,
+                    type=file_spec["types"],
+                    key=f"upload_{file_spec['key']}",
+                )
+
+        # --- Previews ---
+        for file_spec in required_files:
+            fkey = file_spec["key"]
+            uf = uploaded_files.get(fkey)
+            if uf and file_spec["types"] == ["xlsx"]:
+                with st.expander(f"{file_spec['label']} preview", expanded=False):
+                    try:
+                        df_preview = pd.read_excel(uf)
+                        st.dataframe(df_preview.head(5), use_container_width=True)
+                    except Exception:
+                        st.warning("Could not preview this file.")
+                    uf.seek(0)
+
+        # UK-specific section detection
+        if is_uk:
+            notes_uf = uploaded_files.get("responses")
+            if notes_uf:
+                try:
+                    df_n = pd.read_excel(notes_uf)
+                    detected_sections = _detect_sections(df_n)
+                    if detected_sections:
+                        st.info(f"Detected sections: **{', '.join(s.upper() for s in detected_sections)}**")
+                    notes_uf.seek(0)
+                except Exception:
+                    pass
 
     st.divider()
 
@@ -425,10 +554,11 @@ def tab_grade_notes():
 
     # --- Validation ---
     def _validate():
-        for file_spec in required_files:
-            if file_spec.get("required", True) and not uploaded_files.get(file_spec["key"]):
-                st.error(f"Please upload: {file_spec['label']}")
-                return False
+        if not use_synthetic:
+            for file_spec in required_files:
+                if file_spec.get("required", True) and not uploaded_files.get(file_spec["key"]):
+                    st.error(f"Please upload: {file_spec['label']}")
+                    return False
         if not has_env_key and not api_key_input:
             st.error(f"Please provide a {PROVIDER_LABELS[provider]} API key.")
             return False
@@ -447,6 +577,18 @@ def tab_grade_notes():
         if detected_sections:
             config.SECTIONS = detected_sections
 
+    # --- Helper: resolve file paths from uploads or synthetic data ---
+    def _resolve_paths() -> dict[str, str]:
+        """Return a dict of file_key -> path, from synthetic data or uploads."""
+        if use_synthetic:
+            return _get_synthetic_files(selected_type_id) or {}
+        paths = {}
+        for file_spec in required_files:
+            uf = uploaded_files.get(file_spec["key"])
+            if uf:
+                paths[file_spec["key"]] = _save_upload(uf)
+        return paths
+
     # --- Dry Run ---
     if dry_run_clicked:
         if not _validate():
@@ -456,9 +598,10 @@ def tab_grade_notes():
         _set_config()
 
         if is_uk:
-            rubric_path = _save_upload(uploaded_files["rubric"])
-            key_path = _save_upload(uploaded_files["answer_key"])
-            notes_path = _save_upload(uploaded_files["responses"])
+            paths = _resolve_paths()
+            rubric_path = paths.get("rubric", "")
+            key_path = paths.get("answer_key", "")
+            notes_path = paths.get("responses", "")
 
             try:
                 result = run_dry_run(notes_path, rubric_path, key_path)
@@ -476,11 +619,7 @@ def tab_grade_notes():
         else:
             # KPSOM dry run: count students and estimate API calls
             try:
-                saved_paths = {}
-                for file_spec in required_files:
-                    uf = uploaded_files.get(file_spec["key"])
-                    if uf:
-                        saved_paths[file_spec["key"]] = _save_upload(uf)
+                saved_paths = _resolve_paths()
                 df_dry, _ = assessment_type.load_inputs(**saved_paths)
                 sections = assessment_type.get_sections()
                 n_students = len(df_dry)
@@ -520,10 +659,11 @@ def tab_grade_notes():
             return
 
         if is_uk:
-            # ---- UK grading path (unchanged) ----
-            rubric_path = _save_upload(uploaded_files["rubric"])
-            key_path = _save_upload(uploaded_files["answer_key"])
-            notes_path = _save_upload(uploaded_files["responses"])
+            # ---- UK grading path ----
+            paths = _resolve_paths()
+            rubric_path = paths.get("rubric", "")
+            key_path = paths.get("answer_key", "")
+            notes_path = paths.get("responses", "")
 
             try:
                 rubric_content, answer_key_content = read_rubric_and_key(rubric_path, key_path)
@@ -638,11 +778,7 @@ def tab_grade_notes():
 
         else:
             # ---- KPSOM grading path ----
-            saved_paths = {}
-            for file_spec in required_files:
-                uf = uploaded_files.get(file_spec["key"])
-                if uf:
-                    saved_paths[file_spec["key"]] = _save_upload(uf)
+            saved_paths = _resolve_paths()
 
             sections = assessment_type.get_sections()
 
@@ -2070,10 +2206,41 @@ def tab_synthetic_generator():
                 "n_students": synth_n_students,
             }
 
+            # Save the first session to disk for Grade Notes (replaces any existing)
+            _save_synthetic_session(sessions[0], synth_type_id)
+            st.success(
+                f"Synthetic data saved for **{synth_type_options[synth_type_id]}**. "
+                "You can now use it in the Grade Notes tab."
+            )
+
             # Append to history (most recent first), keep up to 10
             history = st.session_state.get("synth_history", [])
             history.insert(0, generation_entry)
             st.session_state["synth_history"] = history[:10]
+
+    # --- Saved synthetic data management ---
+    saved_types = [
+        tid for tid in synth_type_options if _has_synthetic_data(tid)
+    ]
+    if saved_types:
+        st.divider()
+        st.subheader("Saved Synthetic Data (for Grade Notes)")
+        st.caption(
+            "These datasets are saved to disk and available in the Grade Notes tab. "
+            "Generating new data for a type replaces the previous version."
+        )
+        for tid in saved_types:
+            scol1, scol2 = st.columns([3, 1])
+            with scol1:
+                st.markdown(f"**{synth_type_options[tid]}**")
+            with scol2:
+                if st.button(
+                    "Delete",
+                    key=f"synth_delete_{tid}",
+                    type="secondary",
+                ):
+                    _delete_synthetic_data(tid)
+                    st.rerun()
 
     # --- Display recent generations as collapsible expanders ---
     if "synth_history" not in st.session_state:
