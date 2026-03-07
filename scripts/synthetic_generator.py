@@ -122,12 +122,12 @@ _TYPE_META: dict[str, dict] = {
     "kpsom_documentation": {
         "name": "KPSOM Clinical Documentation",
         "sections": {
-            "hpi": ("History of Present Illness", 5),
-            "social_hx": ("Social History", 5),
-            "summary_statement": ("Summary Statement", 5),
-            "assessment": ("Assessment", 5),
-            "plan": ("Plan", 5),
-            "org_lang": ("Organization & Language", 4),
+            "hpi": ("History of Present Illness (PCIG)", 5),
+            "social_hx": ("Social History (PCIG)", 5),
+            "summary_statement": ("Summary Statement (PCDP)", 5),
+            "assessment": ("Assessment (PCDP)", 5),
+            "plan": ("Plan (PCDP)", 5),
+            "written_communication": ("Written Communication (PCVW)", 4),
         },
         "case_context": "clinical documentation note following a patient encounter",
     },
@@ -135,9 +135,9 @@ _TYPE_META: dict[str, dict] = {
         "name": "KPSOM Ethics Open-Ended Questions",
         "sections": {
             "q1_total": ("Q1: Ethical Issue Identification", 4),
-            "q2a_score": ("Q2A: Option Analysis - First Option", 4),
-            "q2b_score": ("Q2B: Option Analysis - Second Option", 4),
-            "q2c_score": ("Q2C: Option Analysis - Third Option", 4),
+            "q2a_score": ("Q2A: Option Analysis - First Option", 2),
+            "q2b_score": ("Q2B: Option Analysis - Second Option", 2),
+            "q2c_score": ("Q2C: Option Analysis - Third Option", 2),
             "q3_total": ("Q3: Capacity Assessment Questions", 8),
         },
         "case_context": "ethics case analysis with open-ended question responses",
@@ -412,6 +412,403 @@ def _build_ipass_rubric_generation_prompt(
     ]
 
 
+def _build_ethics_rubric_generation_prompt(
+    example_rubric_text: str | None = None,
+) -> list[dict[str, str]]:
+    """Build prompt for generating a KPSOM Ethics rubric faithful to real structure.
+
+    The real KPSOM Ethics rubric (Case 8 pattern) has: learner instructions,
+    three questions with time/point allocations, a Resources section with
+    acceptable answers, a milestone score table (9 ranges, 0-18), and an
+    appendix with sample capacity assessment questions.
+    """
+    example_block = ""
+    if example_rubric_text:
+        example_block = (
+            "\n\nHere is a de-identified example rubric from a real administration. "
+            "Use this as a template for tone, detail level, and scoring criteria "
+            "structure. Generate NEW clinical content — do NOT copy verbatim:\n\n"
+            f"--- EXAMPLE RUBRIC ---\n{example_rubric_text}\n--- END EXAMPLE ---\n"
+        )
+
+    system = (
+        "You are a medical education assessment design expert specializing in "
+        "ethics and informed consent for Progress OSCEs. Generate a detailed, "
+        "realistic ethics OSCE grading rubric that mirrors the structure used at "
+        "KPSOM for Progress OSCE peri-encounter ethics tasks."
+    )
+
+    user = (
+        "Generate a complete KPSOM Ethics peri-encounter rubric for a Progress "
+        "OSCE. The scenario must involve informed consent and decision-making "
+        "capacity (e.g., a patient who may lack capacity, a surrogate decision "
+        "situation, or a consent delegation issue).\n\n"
+        "IMPORTANT STRUCTURAL REQUIREMENTS:\n\n"
+        "1. **Case Title**: Format as 'Progress OSCE Administration X – Case Y "
+        "(Patient Name)' where X is a letter (A-D) and Y is a number.\n\n"
+        "2. **Case Description**: A 2-4 sentence clinical vignette describing "
+        "the patient, their condition, and the ethical dilemma.\n\n"
+        "3. **Learner Instructions**: A detailed paragraph structured EXACTLY "
+        "like this pattern:\n"
+        "   - 'Peri-encounter Task' header\n"
+        "   - Reference to a preceding simulated encounter\n"
+        "   - A new scenario the student must respond to\n"
+        "   - '10 minutes to answer 3 questions' with sequential submission\n"
+        "   - Question 1 of 3 (3 minutes / 4 points): 'Answer in 1 to 2 "
+        "sentences' — two sub-parts asking the student to (a) identify what is "
+        "problematic about a consent-related action and (b) how they would "
+        "respond\n"
+        "   - Question 2 of 3 (4 minutes / 6 points): Present EXACTLY 3 "
+        "concrete options/courses of action relevant to the scenario. Ask the "
+        "student to list at least one pro and one con for each option\n"
+        "   - Question 3 of 3 (3 minutes / 8 points): Ask the student to write "
+        "4 questions they would ask the patient to assess decision-making "
+        "capacity, each addressing a different key element\n\n"
+        "4. **Sections** — each section uses a SPECIFIC scoring format:\n\n"
+        "   a) **q1_total** (4 pts total) — Two sub-components:\n"
+        "      - 'Problematic aspects' (0-2 pts): 1 pt each for up to 2 "
+        "clearly identified problems\n"
+        "      - 'Reasonable response' (0-2 pts): 1 pt each for up to 2 "
+        "reasonable elements of what the student would do\n"
+        "      - Score levels: 4 = both sub-parts full marks, 3 = one sub-part "
+        "full + one partial, 2 = one sub-part full or both partial, "
+        "1 = minimal identification, 0 = nothing relevant\n\n"
+        "   b) **q2a_score** (2 pts) — Option A pro/con analysis:\n"
+        "      - 1 pt for at least one reasonable pro\n"
+        "      - 1 pt for at least one reasonable con\n"
+        "      - Score levels: 2 = both pro and con identified, 1 = only pro "
+        "or only con, 0 = neither\n\n"
+        "   c) **q2b_score** (2 pts) — Option B pro/con analysis (same format "
+        "as Q2A)\n\n"
+        "   d) **q2c_score** (2 pts) — Option C pro/con analysis (same format "
+        "as Q2A)\n\n"
+        "   e) **q3_total** (8 pts total) — Four capacity assessment questions:\n"
+        "      - 2 pts each for questions clearly addressing one of the 5 key "
+        "elements in patient-friendly language\n"
+        "      - 1 pt for questions that address a key element but poorly/unclearly\n"
+        "      - 0 pts for questions about orientation, diagnosis, or non-key elements\n"
+        "      - No double-counting: if 2+ questions address the same element, "
+        "only score the best one\n"
+        "      - Score levels: 8 = all four excellent, 6 = three excellent + one "
+        "partial, 4 = two good questions, 2 = one good question, 0 = none "
+        "address key elements\n\n"
+        "5. **Resources / Model Answer**: This is CRITICAL. Generate a complete "
+        "reference answer key structured as follows:\n\n"
+        "   RESOURCES\n\n"
+        "   For Part A:\n"
+        "   Problematic aspects of [the ethical action] include:\n"
+        "   1. [List 6 specific problematic aspects relevant to the scenario]\n"
+        "   ...\n"
+        "   6. [Last problematic aspect]\n\n"
+        "   Reasonable elements of what the student might do:\n"
+        "   1. [List 3-4 reasonable responses]\n\n"
+        "   For Part B:\n"
+        "   Pros and cons of each option:\n"
+        "   1. [Option A description]\n"
+        "     - Pro: [2-3 bullet points]\n"
+        "     - Con: [2-3 bullet points]\n"
+        "   2. [Option B description]\n"
+        "     - Pro: [2-3 bullet points]\n"
+        "     - Con: [2-3 bullet points]\n"
+        "   3. [Option C description]\n"
+        "     - Pro: [2-3 bullet points]\n"
+        "     - Con: [2-3 bullet points]\n\n"
+        "   For Part C:\n"
+        "   Key elements of decision-making capacity:\n"
+        "   1. Appreciates current relevant medical situation\n"
+        "   2. Understands intervention being proposed, with risks and benefits\n"
+        "   3. Understands alternatives to proposed intervention, with risks "
+        "and benefits\n"
+        "   4. Is able to express or communicate a choice\n"
+        "   5. Is able to give reasons for the choice\n\n"
+        "   Notes:\n"
+        "   - Informed consent is a process, not a document\n"
+        "   - Informed consent requires a conversation\n\n"
+        "   APPENDIX: Questions to Ask During an Evaluation of Medical "
+        "Decision-Making Capacity\n"
+        "   [Generate 3-4 sample questions for EACH of the following categories:]\n"
+        "   - Questions to determine the patient's ability to understand "
+        "treatment and care options\n"
+        "   - Questions to determine the patient's ability to appreciate how "
+        "that information applies to their situation\n"
+        "   - Questions to determine the patient's ability to reason with that "
+        "information\n"
+        "   - Questions to determine the patient's ability to communicate and "
+        "express a choice\n\n"
+        "6. **Milestone Score Table**: The rubric describes what scores "
+        "correspond to each developmental stage. Include a 'Mapping scores to "
+        "milestones' section explaining what score ranges are expected at "
+        "graduation, end of Phase 2, end of Phase 1, and entry level.\n\n"
+        "Use these EXACT score table ranges:\n"
+        f"{example_block}\n"
+        "Respond with ONLY valid JSON using this EXACT structure:\n"
+        "{\n"
+        '  "case_title": "Progress OSCE Administration X – Case Y (Patient Name)",\n'
+        '  "case_description": "2-4 sentence clinical vignette...",\n'
+        '  "learner_instructions": "Full peri-encounter task instructions '
+        'including all 3 questions with time/point allocations...",\n'
+        '  "model_answer": "RESOURCES\\n\\nFor Part A:\\n...\\n\\nFor Part B:\\n'
+        '...\\n\\nFor Part C:\\n...\\n\\nAPPENDIX\\n...",\n'
+        '  "sections": {\n'
+        '    "q1_total": {\n'
+        '      "criteria": "Part A (4 possible points): 1 point each for up to '
+        "two problematic aspects clearly captured in the response (2 possible "
+        "points). 1 point each for up to two reasonable elements of what the "
+        'student says they would do (2 possible points).",\n'
+        '      "score_levels": {"4": "...", "3": "...", "2": "...", "1": "...", '
+        '"0": "..."}\n'
+        "    },\n"
+        '    "q2a_score": {\n'
+        '      "criteria": "Part B Option 1 (2 possible points): 1 point for '
+        "each reasonable pro or con, maximum of 1 pro point and 1 con point. "
+        'Not limited to listed examples.",\n'
+        '      "score_levels": {"2": "...", "1": "...", "0": "..."}\n'
+        "    },\n"
+        '    "q2b_score": {\n'
+        '      "criteria": "Part B Option 2 (2 possible points): same format '
+        'as Option 1.",\n'
+        '      "score_levels": {"2": "...", "1": "...", "0": "..."}\n'
+        "    },\n"
+        '    "q2c_score": {\n'
+        '      "criteria": "Part B Option 3 (2 possible points): same format '
+        'as Option 1.",\n'
+        '      "score_levels": {"2": "...", "1": "...", "0": "..."}\n'
+        "    },\n"
+        '    "q3_total": {\n'
+        '      "criteria": "Part C (8 possible points): 2 points for each '
+        "question that clearly addresses one of the 5 key elements of "
+        "decision-making capacity in clear, patient-centered language; 1 point "
+        "for questions that address a key element but poorly or unclearly; no "
+        "additional points if 2+ questions address the same element; no points "
+        'for questions about orientation, diagnoses, etc.",\n'
+        '      "score_levels": {"8": "...", "6": "...", "4": "...", "2": "...", '
+        '"0": "..."}\n'
+        "    }\n"
+        "  },\n"
+        '  "score_table": [\n'
+        '    {"range": "0-3", "milestone": "Entry"},\n'
+        '    {"range": "3.5-5.5", "milestone": "Entry to Early Developing"},\n'
+        '    {"range": "6-7.5", "milestone": "Early Developing"},\n'
+        '    {"range": "8-9.5", "milestone": "Early Developing to Mid-Developing"},\n'
+        '    {"range": "10-11.5", "milestone": "Mid-Developing"},\n'
+        '    {"range": "12-13", "milestone": "Mid-Developing to Advanced Developing"},\n'
+        '    {"range": "13.5-15", "milestone": "Advanced Developing"},\n'
+        '    {"range": "15.5-16", "milestone": "Advanced Developing to Aspirational"},\n'
+        '    {"range": "16.5-18", "milestone": "Aspirational"}\n'
+        "  ]\n"
+        "}"
+    )
+
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def _build_documentation_rubric_generation_prompt(
+    example_rubric_text: str | None = None,
+) -> list[dict[str, str]]:
+    """Build prompt for generating a KPSOM Clinical Documentation rubric.
+
+    The real KPSOM Documentation rubric has: learner instructions with a
+    pre-filled note template, milestone-based scoring (1-5) with case-specific
+    criteria, competency domain tags (PCIG/PCDP/PCVW), domain-specific
+    milestone mappings, and a complete model answer.
+    """
+    example_block = ""
+    if example_rubric_text:
+        example_block = (
+            "\n\nHere is a de-identified example rubric from a real administration. "
+            "Use this as a template for tone, detail level, and scoring criteria "
+            "structure. Generate NEW clinical content — do NOT copy verbatim:\n\n"
+            f"--- EXAMPLE RUBRIC ---\n{example_rubric_text}\n--- END EXAMPLE ---\n"
+        )
+
+    system = (
+        "You are a medical education assessment design expert specializing in "
+        "clinical documentation for Progress OSCEs. Generate a detailed, "
+        "realistic clinical documentation OSCE grading rubric that mirrors "
+        "the structure used at KPSOM for Progress OSCE peri-encounter tasks."
+    )
+
+    user = (
+        "Generate a complete KPSOM Clinical Documentation peri-encounter "
+        "rubric for a Progress OSCE.\n\n"
+        "IMPORTANT STRUCTURAL REQUIREMENTS:\n\n"
+        "1. **Case Title**: Format as 'Progress OSCE (Patient Name) Case X "
+        "Version Y - Peri-encounter Task'\n\n"
+        "2. **Case Description**: A 2-4 sentence clinical vignette describing "
+        "the patient, their chief concern, and the clinical scenario.\n\n"
+        "3. **Learner Instructions**: A pre-filled clinical note template that "
+        "the student must complete. Structure it EXACTLY like this:\n"
+        "   - 'Learner instructions:' header\n"
+        "   - Instruction paragraph telling the student to complete the note "
+        "by documenting HPI, social history, summary statement, assessment, "
+        "and plan. State that the remainder has been provided, including "
+        "physical examination findings.\n"
+        "   - Pre-filled note template with:\n"
+        "     * Chief Concern: (filled in with patient's chief complaint)\n"
+        "     * History of Present Illness: _________ (blank for student)\n"
+        "     * Birth History / Past Medical History / Past Surgical History / "
+        "Allergies / Medications / Family History: (ALL filled in with "
+        "case-specific details)\n"
+        "     * Social History: _________ (blank for student)\n"
+        "     * Physical Examination: (filled in with complete, detailed "
+        "findings for all relevant systems — General, Eyes, HEENT, Cardiac, "
+        "Pulmonary, Abdominal, Neurological, Extremities, etc.)\n"
+        "     * Summary Statement: _________ (blank)\n"
+        "     * Assessment: _________ (blank)\n"
+        "     * Plan: _________ (blank)\n\n"
+        "4. **Sections** — each uses MILESTONE-BASED scoring (1-5 scale) with "
+        "CASE-SPECIFIC criteria. Each milestone level must list specific "
+        "clinical elements the student should include, NOT generic descriptors. "
+        "The criteria must reference actual clinical details from the case.\n\n"
+        "   a) **hpi** (PCIG, 5 pts) — History of Present Illness:\n"
+        "      - Use OPQRST-A framework (Onset, Provoking/Palliating, Quality, "
+        "Region/Radiation, Severity, Timing, Associated symptoms)\n"
+        "      - Each level specifies how many OPQRST elements are needed\n"
+        "      - List specific pertinent positives and negatives relevant to "
+        "the case (e.g., 'nausea', 'lightheadedness', 'no vomiting', "
+        "'no visual changes')\n"
+        "      - Entry (1): 1-2 OPQRST elements, no pertinent pos/neg\n"
+        "      - Early Developing (2): 4+ OPQRST, 1-2 associated symptoms\n"
+        "      - Mid-Developing (3): 6+ OPQRST, 1+ pertinent positive, "
+        "1+ pertinent negative\n"
+        "      - Advanced Developing (4): 6+ OPQRST, 1+ pertinent positive, "
+        "2+ pertinent negatives, additional relevant history\n"
+        "      - Aspirational (5): 8+ OPQRST, 2+ pertinent positives, "
+        "3+ pertinent negatives, patient concerns\n\n"
+        "   b) **social_hx** (PCIG, 5 pts) — Social History:\n"
+        "      - Use an appropriate social history framework for the patient "
+        "population (e.g., HEADSS for adolescents: Home, Education, "
+        "Activities, Drugs, Sexuality, Suicide/Safety; or for adults: "
+        "occupation, living situation, substance use, relationships, etc.)\n"
+        "      - Each level specifies how many framework elements are needed\n"
+        "      - List specific social history details relevant to the case\n"
+        "      - Entry (1): May omit social history entirely\n"
+        "      - Aspirational (5): Comprehensive coverage of all framework "
+        "elements with case-specific details\n\n"
+        "   c) **summary_statement** (PCDP, 5 pts) — Summary Statement:\n"
+        "      - Each level specifies required elements (age, gender, "
+        "presenting symptom, pertinent history using semantic qualifiers, "
+        "relevant PE findings, pertinent negatives)\n"
+        "      - List the specific semantic qualifiers relevant to the case\n"
+        "      - Higher levels require more pertinent history items and "
+        "pertinent negatives, with no irrelevant information\n\n"
+        "   d) **assessment** (PCDP, 5 pts) — Assessment:\n"
+        "      - Specify the correct primary working diagnosis for the case\n"
+        "      - List the specific differential diagnoses (3-4) with their "
+        "justifications/rationale based on case findings\n"
+        "      - Entry (1): single diagnosis, may be incorrect, no rationale\n"
+        "      - Mid-Developing (3): identifies correct primary diagnosis "
+        "with rationale + 1 differential\n"
+        "      - Aspirational (5): correct primary with thorough rationale + "
+        "2+ differentials with reasoning for why less likely\n\n"
+        "   e) **plan** (PCDP, 5 pts) — Plan:\n"
+        "      - List specific next steps relevant to the case (diagnostic "
+        "tests, treatments, counseling, follow-up)\n"
+        "      - Specify what interventions are inappropriate for this case\n"
+        "      - Higher levels include patient education, return precautions, "
+        "and follow-up arrangements\n\n"
+        "   f) **written_communication** (PCVW, 4 pts) — Written Communication:\n"
+        "      - This is the ONE section with generic (non-case-specific) "
+        "criteria about writing quality\n"
+        "      - Score levels: 4 = well-organized, clear, cohesive story; "
+        "3 = mostly well-organized; 2 = some disorganization; "
+        "1 = significant disorganization\n"
+        "      - Criteria cover: organization/cohesiveness, wordiness, "
+        "clarity, typos/grammar, appropriate terminology\n\n"
+        "5. **Model Answer**: Generate a COMPLETE top-scoring clinical note "
+        "with ALL sections filled in. Format with section headers:\n"
+        "   - HPI: (detailed, covering all OPQRST elements and pertinent "
+        "pos/neg)\n"
+        "   - Social History: (comprehensive coverage of the framework)\n"
+        "   - Summary Statement: (concise synthesis with semantic qualifiers)\n"
+        "   - Assessment: (prioritized differential with rationale)\n"
+        "   - Plan: (comprehensive with diagnostics, therapeutics, education, "
+        "follow-up)\n\n"
+        "6. **Milestone Score Table**: Include BOTH domain-specific AND "
+        "cumulative milestone mappings. Use these EXACT ranges:\n\n"
+        "   PCIG (HPI + Social History = 10 points possible):\n"
+        "   10 pts = Aspirational, 9 = Advanced Developing to Aspirational, "
+        "8 = Advanced Developing, 7 = Mid-Developing to Advanced Developing, "
+        "6 = Mid-Developing, 5 = Early Developing to Mid-Developing, "
+        "4 = Early Developing, 3 = Entry to Early Developing, 2 = Entry, "
+        "<2 = Behavior requiring corrective response\n\n"
+        "   PCDP (Summary + Assessment + Plan = 15 points possible):\n"
+        "   14-15 = Aspirational, 13 = Adv Dev to Aspirational, "
+        "11-12 = Adv Dev, 10 = Mid-Dev to Adv Dev, 8-9 = Mid-Dev, "
+        "7 = Early Dev to Mid-Dev, 5-6 = Early Dev, 4 = Entry to Early Dev, "
+        "3 = Entry, <3 = Behavior requiring corrective response\n\n"
+        "   PCVW (Written Communication = 4 points possible):\n"
+        "   4 = Advanced Developing, 3.5 = Mid-Dev to Adv Dev, 3 = Mid-Dev, "
+        "2.5 = Early Dev to Mid-Dev, 2 = Early Dev, 1.5 = Entry to Early Dev, "
+        "1 = Entry, 0 = Behavior requiring corrective response\n\n"
+        "   Cumulative (total across all 6 components = 29 points possible):\n"
+        f"{example_block}\n"
+        "Respond with ONLY valid JSON using this EXACT structure:\n"
+        "{\n"
+        '  "case_title": "Progress OSCE (Patient Name) Case X Version Y '
+        '- Peri-encounter Task",\n'
+        '  "case_description": "2-4 sentence clinical vignette...",\n'
+        '  "learner_instructions": "Full pre-filled note template with '
+        'completed sections and blanks for student to fill in...",\n'
+        '  "model_answer": "HPI:\\n[detailed HPI]\\n\\nSocial History:\\n'
+        '[comprehensive social history]\\n\\nSummary Statement:\\n[concise '
+        'synthesis]\\n\\nAssessment:\\n[prioritized differential]\\n\\nPlan:\\n'
+        '[comprehensive plan]",\n'
+        '  "sections": {\n'
+        '    "hpi": {\n'
+        '      "criteria": "HPI (PCIG): Case-specific OPQRST criteria...",\n'
+        '      "score_levels": {"5": "case-specific aspirational...", '
+        '"4": "...", "3": "...", "2": "...", "1": "..."}\n'
+        "    },\n"
+        '    "social_hx": {\n'
+        '      "criteria": "Social History (PCIG): Framework-specific...",\n'
+        '      "score_levels": {"5": "...", "4": "...", "3": "...", '
+        '"2": "...", "1": "..."}\n'
+        "    },\n"
+        '    "summary_statement": {\n'
+        '      "criteria": "Summary Statement (PCDP): ...",\n'
+        '      "score_levels": {"5": "...", "4": "...", "3": "...", '
+        '"2": "...", "1": "..."}\n'
+        "    },\n"
+        '    "assessment": {\n'
+        '      "criteria": "Assessment (PCDP): ...",\n'
+        '      "score_levels": {"5": "...", "4": "...", "3": "...", '
+        '"2": "...", "1": "..."}\n'
+        "    },\n"
+        '    "plan": {\n'
+        '      "criteria": "Plan (PCDP): ...",\n'
+        '      "score_levels": {"5": "...", "4": "...", "3": "...", '
+        '"2": "...", "1": "..."}\n'
+        "    },\n"
+        '    "written_communication": {\n'
+        '      "criteria": "Written Communication (PCVW): ...",\n'
+        '      "score_levels": {"4": "...", "3": "...", "2": "...", '
+        '"1": "..."}\n'
+        "    }\n"
+        "  },\n"
+        '  "score_table": [\n'
+        '    {"range": "28-29", "milestone": "Aspirational"},\n'
+        '    {"range": "25-27", "milestone": "Advanced Developing to Aspirational"},\n'
+        '    {"range": "23-24", "milestone": "Advanced Developing"},\n'
+        '    {"range": "19-22", "milestone": "Mid-Developing to Advanced Developing"},\n'
+        '    {"range": "17-18", "milestone": "Mid-Developing"},\n'
+        '    {"range": "13-16", "milestone": "Early Developing to Mid-Developing"},\n'
+        '    {"range": "11-12", "milestone": "Early Developing"},\n'
+        '    {"range": "7-10", "milestone": "Entry to Early Developing"},\n'
+        '    {"range": "6", "milestone": "Entry"}\n'
+        "  ]\n"
+        "}"
+    )
+
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
 def _build_rubric_generation_prompt(
     type_id: str,
     example_rubric_text: str | None = None,
@@ -420,6 +817,10 @@ def _build_rubric_generation_prompt(
     # Dispatch to type-specific prompt builders
     if type_id == "kpsom_ipass":
         return _build_ipass_rubric_generation_prompt(example_rubric_text)
+    if type_id == "kpsom_ethics":
+        return _build_ethics_rubric_generation_prompt(example_rubric_text)
+    if type_id == "kpsom_documentation":
+        return _build_documentation_rubric_generation_prompt(example_rubric_text)
 
     meta = _TYPE_META[type_id]
     sections_desc = "\n".join(
@@ -709,6 +1110,100 @@ def _parse_rubric_response(text: str, type_id: str) -> SyntheticRubric:
 
 
 # ---------------------------------------------------------------------------
+# Rubric generation / parsing (public API)
+# ---------------------------------------------------------------------------
+
+
+def generate_rubric(
+    type_id: str,
+    llm_caller,
+    *,
+    temperature: float = 0.7,
+    variability: float = 0.5,
+    example_rubric_text: str | None = None,
+) -> SyntheticRubric:
+    """Generate a single rubric for the given assessment type.
+
+    Call this once and pass the result to ``generate_synthetic_session()``
+    so that all sessions share the same rubric (same exam).
+    """
+    meta = _TYPE_META.get(type_id)
+    if meta is None:
+        raise ValueError(f"Unknown assessment type: {type_id}")
+
+    eff_temp = temperature * (0.5 + variability)
+    rubric_messages = _build_rubric_generation_prompt(type_id, example_rubric_text)
+    rubric_response = llm_caller(rubric_messages, eff_temp, 1.0)
+    return _parse_rubric_response(rubric_response, type_id)
+
+
+def parse_supplied_rubric(
+    type_id: str,
+    rubric_text: str,
+    llm_caller,
+) -> SyntheticRubric:
+    """Parse a user-supplied rubric into a :class:`SyntheticRubric`.
+
+    Uses the LLM to **extract** (not generate) the rubric content from
+    *rubric_text* into the structured JSON format expected by the synthetic
+    pipeline.  This lets students respond to the *actual* supplied rubric
+    rather than a synthetically generated one.
+    """
+    meta = _TYPE_META.get(type_id)
+    if meta is None:
+        raise ValueError(f"Unknown assessment type: {type_id}")
+
+    sections_desc = "\n".join(
+        f'- "{sec_key}": {display} (max {max_s} points)'
+        for sec_key, (display, max_s) in meta["sections"].items()
+    )
+
+    system = (
+        "You are a medical education assistant. Extract the rubric content "
+        "from the supplied text into structured JSON. Do NOT invent or "
+        "generate new content — extract what is already present."
+    )
+
+    user = (
+        "Parse the following rubric and extract its content into JSON.\n\n"
+        f"Assessment type: {meta['name']}\n"
+        f"Expected section keys:\n{sections_desc}\n\n"
+        "--- RUBRIC TEXT ---\n"
+        f"{rubric_text}\n"
+        "--- END RUBRIC TEXT ---\n\n"
+        "Extract into this EXACT JSON structure:\n"
+        "{\n"
+        '  "case_title": "the title/header from the rubric",\n'
+        '  "case_description": "the case vignette or scenario description",\n'
+        '  "learner_instructions": "the learner/student instructions if present, '
+        'otherwise empty string",\n'
+        '  "model_answer": "the model answer or resources section if present, '
+        'otherwise empty string",\n'
+        '  "sections": {\n'
+        '    "<section_key>": {\n'
+        '      "criteria": "the full criteria text for this section",\n'
+        '      "score_levels": {"<score>": "descriptor at that level", ...}\n'
+        "    }\n"
+        "  },\n"
+        '  "score_table": [\n'
+        '    {"range": "score range", "milestone": "milestone label"}\n'
+        "  ]\n"
+        "}\n\n"
+        "Use the section keys listed above. Include ALL criteria text, "
+        "score level descriptors, and milestone mappings found in the rubric. "
+        "Respond with ONLY valid JSON."
+    )
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+    response = llm_caller(messages, 0.0, 1.0)
+    return _parse_rubric_response(response, type_id)
+
+
+# ---------------------------------------------------------------------------
 # Session generation orchestrator
 # ---------------------------------------------------------------------------
 
@@ -720,6 +1215,7 @@ def generate_synthetic_session(
     llm_caller,
     *,
     temperature: float = 0.7,
+    rubric: SyntheticRubric | None = None,
     example_rubric_text: str | None = None,
     example_notes: dict[str, str] | None = None,
     example_scores: dict[int, dict[str, float]] | None = None,
@@ -742,8 +1238,13 @@ def generate_synthetic_session(
         ``(messages, temperature, top_p) -> str`` LLM call function.
     temperature : float
         Base LLM temperature for generation.
+    rubric : SyntheticRubric, optional
+        Pre-generated rubric to use for this session.  When provided, the
+        rubric generation step is skipped — allowing all sessions to share
+        the same rubric (same exam).
     example_rubric_text : str, optional
-        De-identified rubric text to ground generation.
+        De-identified rubric text to ground generation.  Only used when
+        *rubric* is ``None`` (i.e. the rubric must be generated).
     example_notes : dict, optional
         Example student notes ``{section: text}`` for grounding.
     example_scores : dict, optional
@@ -763,13 +1264,17 @@ def generate_synthetic_session(
     # Effective temperature scales with variability
     eff_temp = temperature * (0.5 + variability)
 
-    # --- Step 1: Generate rubric ---
-    if progress_callback:
-        progress_callback("Generating rubric", 0, n_students + 2)
+    # --- Step 1: Use provided rubric or generate one ---
+    if rubric is None:
+        if progress_callback:
+            progress_callback("Generating rubric", 0, n_students + 2)
 
-    rubric_messages = _build_rubric_generation_prompt(type_id, example_rubric_text)
-    rubric_response = llm_caller(rubric_messages, eff_temp, 1.0)
-    rubric = _parse_rubric_response(rubric_response, type_id)
+        rubric_messages = _build_rubric_generation_prompt(type_id, example_rubric_text)
+        rubric_response = llm_caller(rubric_messages, eff_temp, 1.0)
+        rubric = _parse_rubric_response(rubric_response, type_id)
+    else:
+        if progress_callback:
+            progress_callback("Using shared rubric", 0, n_students + 2)
 
     # --- Step 2: Generate faculty persona ---
     tendencies = ["lenient", "moderate", "strict"]

@@ -58,7 +58,9 @@ from gold_standard import (
     ConsensusResult,
 )
 from synthetic_generator import (
+    generate_rubric,
     generate_synthetic_session,
+    parse_supplied_rubric,
     rubric_to_display_text,
     rubric_to_excel,
     rubric_to_docx,
@@ -2004,6 +2006,18 @@ def tab_synthetic_generator():
                 _save_example(synth_type_id, slot, new_file)
                 st.rerun()
 
+    rubric_path_check = _get_example_path(synth_type_id, "rubric")
+    use_supplied_rubric = st.checkbox(
+        "Use supplied rubric directly (students respond to the actual rubric)",
+        help=(
+            "When checked, the uploaded rubric is parsed and used as-is for "
+            "student responses instead of generating a synthetic rubric. "
+            "Requires an example rubric to be uploaded above."
+        ),
+        disabled=not bool(rubric_path_check),
+        key=f"synth_use_supplied_{synth_type_id}",
+    )
+
     # --- Model selection ---
     st.subheader("LLM Configuration")
     synth_model_options = {
@@ -2114,6 +2128,28 @@ def tab_synthetic_generator():
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        # --- Generate or parse the rubric ONCE for all sessions ---
+        try:
+            if use_supplied_rubric and example_rubric_text:
+                progress_bar.progress(0.02, text="Parsing supplied rubric...")
+                shared_rubric = parse_supplied_rubric(
+                    synth_type_id, example_rubric_text, caller,
+                )
+            else:
+                progress_bar.progress(0.02, text="Generating rubric...")
+                shared_rubric = generate_rubric(
+                    synth_type_id,
+                    caller,
+                    temperature=synth_temperature,
+                    variability=synth_variability,
+                    example_rubric_text=example_rubric_text,
+                )
+        except Exception as exc:
+            st.error(f"Rubric generation/parsing failed: {exc}")
+            logger.exception("Rubric generation/parsing failed")
+            _cfg.MAX_TOKENS = _prev_max_tokens
+            return
+
         def _gen_session(s_idx):
             """Generate one session. No Streamlit calls — runs in threads."""
             return generate_synthetic_session(
@@ -2123,7 +2159,7 @@ def tab_synthetic_generator():
                 variability=synth_variability,
                 llm_caller=caller,
                 temperature=synth_temperature,
-                example_rubric_text=example_rubric_text,
+                rubric=shared_rubric,
                 example_notes=example_notes,
                 example_scores=example_scores,
                 seed=42 + s_idx,
@@ -2144,7 +2180,7 @@ def tab_synthetic_generator():
                     variability=synth_variability,
                     llm_caller=caller,
                     temperature=synth_temperature,
-                    example_rubric_text=example_rubric_text,
+                    rubric=shared_rubric,
                     example_notes=example_notes,
                     example_scores=example_scores,
                     seed=42,
