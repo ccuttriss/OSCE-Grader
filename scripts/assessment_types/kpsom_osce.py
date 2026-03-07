@@ -407,6 +407,9 @@ class KPSOMBaseType(AssessmentType):
         scores_path = file_paths.get("scores")
         if scores_path:
             faculty_df = _load_faculty_scores(scores_path)
+            # Map display-name columns to canonical section keys so that
+            # process_assessment can look up scores by section key.
+            faculty_df = _map_columns(faculty_df, self._column_map)
             rubric_data["faculty_scores"] = faculty_df
 
         return df, rubric_data
