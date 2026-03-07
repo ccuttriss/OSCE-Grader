@@ -550,27 +550,64 @@ def session_to_excel(session: SessionData) -> bytes:
         # Format: 2 blank header rows, then real headers at row 3, data at row 4+
         ws.append([])  # row 1 (merged group header placeholder)
         ws.append([])  # row 2 (merged group header placeholder)
-        headers = ["Student"] + [display.get(s, s) for s in sections]
+        headers = ["Student"] + [display.get(s, s) for s in sections] + ["Total", "Milestone", "Comments"]
         ws.append(headers)  # row 3 = real headers
+        from assessment_types.kpsom_osce import derive_milestone
         for sid in sorted(session.scores.keys()):
-            row = [sid] + [session.scores[sid].get(s) for s in sections]
+            scores = session.scores[sid]
+            sec_values = [scores.get(s) for s in sections]
+            total = sum(v for v in sec_values if v is not None)
+            # Derive milestone using the I-PASS logic
+            sa_score = scores.get("situation_awareness", 0) or 0
+            org_score = scores.get("organization", 0) or 0
+            has_sa = sa_score > 0
+            milestone = derive_milestone(total, has_sa, org_score)
+            row = [sid] + sec_values + [total, milestone, ""]
             ws.append(row)
 
     elif type_id == "kpsom_documentation":
         # Format: single header row with many columns; scores at specific indices
-        # We produce a simplified version that the loader can still parse:
-        # fill columns 0-73 with blanks except the score columns
-        n_cols = 74
+        # Columns 0-73 for individual scores, 74-81 for domain totals/milestones
+        n_cols = 82
         header_row = [""] * n_cols
         col_map = {29: "hpi", 34: "social_hx", 49: "summary_statement",
                     58: "assessment", 72: "plan", 73: "org_lang"}
+        summary_col_map = {
+            74: "PCIG Total", 75: "PCIG Milestone",
+            76: "PCDP Total", 77: "PCDP Milestone",
+            78: "PCDO Score", 79: "PCDO Milestone",
+            80: "Total Score", 81: "Total Milestone",
+        }
         for idx, sec in col_map.items():
             header_row[idx] = display.get(sec, sec)
+        for idx, label in summary_col_map.items():
+            header_row[idx] = label
         ws.append(header_row)  # row 1 = header
+
+        from assessment_types.kpsom_documentation import derive_documentation_milestone
         for sid in sorted(session.scores.keys()):
             data_row = [None] * n_cols
             for idx, sec in col_map.items():
                 data_row[idx] = session.scores[sid].get(sec)
+            # Compute domain totals and milestones
+            hpi = session.scores[sid].get("hpi") or 0
+            social_hx = session.scores[sid].get("social_hx") or 0
+            summary = session.scores[sid].get("summary_statement") or 0
+            assessment = session.scores[sid].get("assessment") or 0
+            plan = session.scores[sid].get("plan") or 0
+            org_lang = session.scores[sid].get("org_lang") or 0
+            pcig = hpi + social_hx
+            pcdp = summary + assessment + plan
+            pcdo = org_lang
+            total = pcig + pcdp + pcdo
+            data_row[74] = pcig
+            data_row[75] = derive_documentation_milestone(pcig)
+            data_row[76] = pcdp
+            data_row[77] = derive_documentation_milestone(pcdp)
+            data_row[78] = pcdo
+            data_row[79] = ""
+            data_row[80] = total
+            data_row[81] = derive_documentation_milestone(total)
             ws.append(data_row)
 
     elif type_id == "kpsom_ethics":
