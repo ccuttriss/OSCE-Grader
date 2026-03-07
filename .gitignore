@@ -7,3 +7,5 @@ __pycache__/
 *.env
 synthetic_data/
 uploads_tmp/
+osce_grader.db
+examples/

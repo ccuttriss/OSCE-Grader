@@ -399,20 +399,27 @@ def process_assessment(
     # --- Load inputs ---
     df, rubric_data = assessment_type.load_inputs(**file_paths)
 
-    # --- Parse rubric via LLM for KPSOM types ---
-    if hasattr(assessment_type, '_rubric_task_type') and rubric_data.get("rubric_path"):
+    # --- Load rubric criteria ---
+    # Check for DB-stored rubric first (synthetic data path — no LLM re-parsing)
+    rubric_id = file_paths.get("rubric_id") or rubric_data.get("rubric_id")
+    if rubric_id:
+        from database import get_rubric_sections_as_parsed
+        rubric_data["parsed_rubric"] = get_rubric_sections_as_parsed(rubric_id)
+        logger.info(
+            "Rubric loaded from database (id=%s). Sections: %s",
+            rubric_id, list(rubric_data["parsed_rubric"].keys()),
+        )
+    elif hasattr(assessment_type, '_rubric_task_type') and rubric_data.get("rubric_path"):
+        # Fallback: parse rubric .docx via LLM for uploaded files
         from assessment_types.kpsom_osce import parse_rubric_with_llm
 
-        # Map custom rubric task types to the parse_rubric_with_llm's expected types
         task_type = assessment_type._rubric_task_type
         if task_type in ("checklist", "milestone"):
             parse_type = task_type
         else:
-            # For documentation, ethics, etc. — use a custom parse prompt
             parse_type = task_type
 
         logger.info("Parsing rubric with LLM (one-time)...")
-        # Use type-specific rubric parse prompt if available
         if hasattr(assessment_type, '_rubric_parse_prompt'):
             import json as _json
             raw_text = __import__('convert_rubric').convert_docx_to_text(

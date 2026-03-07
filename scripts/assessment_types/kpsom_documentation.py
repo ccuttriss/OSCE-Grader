@@ -291,6 +291,8 @@ class KPSOMDocumentationType(AssessmentType):
 
         df = _load_documentation_responses(responses_path)
         rubric_data: dict = {"rubric_path": file_paths.get("rubric")}
+        if "rubric_id" in file_paths:
+            rubric_data["rubric_id"] = file_paths["rubric_id"]
 
         scores_path = file_paths.get("scores")
         if scores_path:
