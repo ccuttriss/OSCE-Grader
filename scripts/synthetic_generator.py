@@ -122,12 +122,12 @@ _TYPE_META: dict[str, dict] = {
     "kpsom_documentation": {
         "name": "KPSOM Clinical Documentation",
         "sections": {
-            "hpi": ("History of Present Illness", 5),
-            "social_hx": ("Social History", 5),
-            "summary_statement": ("Summary Statement", 5),
-            "assessment": ("Assessment", 5),
-            "plan": ("Plan", 5),
-            "org_lang": ("Organization & Language", 4),
+            "hpi": ("History of Present Illness (PCIG)", 5),
+            "social_hx": ("Social History (PCIG)", 5),
+            "summary_statement": ("Summary Statement (PCDP)", 5),
+            "assessment": ("Assessment (PCDP)", 5),
+            "plan": ("Plan (PCDP)", 5),
+            "written_communication": ("Written Communication (PCVW)", 4),
         },
         "case_context": "clinical documentation note following a patient encounter",
     },
@@ -605,6 +605,210 @@ def _build_ethics_rubric_generation_prompt(
     ]
 
 
+def _build_documentation_rubric_generation_prompt(
+    example_rubric_text: str | None = None,
+) -> list[dict[str, str]]:
+    """Build prompt for generating a KPSOM Clinical Documentation rubric.
+
+    The real KPSOM Documentation rubric has: learner instructions with a
+    pre-filled note template, milestone-based scoring (1-5) with case-specific
+    criteria, competency domain tags (PCIG/PCDP/PCVW), domain-specific
+    milestone mappings, and a complete model answer.
+    """
+    example_block = ""
+    if example_rubric_text:
+        example_block = (
+            "\n\nHere is a de-identified example rubric from a real administration. "
+            "Use this as a template for tone, detail level, and scoring criteria "
+            "structure. Generate NEW clinical content — do NOT copy verbatim:\n\n"
+            f"--- EXAMPLE RUBRIC ---\n{example_rubric_text}\n--- END EXAMPLE ---\n"
+        )
+
+    system = (
+        "You are a medical education assessment design expert specializing in "
+        "clinical documentation for Progress OSCEs. Generate a detailed, "
+        "realistic clinical documentation OSCE grading rubric that mirrors "
+        "the structure used at KPSOM for Progress OSCE peri-encounter tasks."
+    )
+
+    user = (
+        "Generate a complete KPSOM Clinical Documentation peri-encounter "
+        "rubric for a Progress OSCE.\n\n"
+        "IMPORTANT STRUCTURAL REQUIREMENTS:\n\n"
+        "1. **Case Title**: Format as 'Progress OSCE (Patient Name) Case X "
+        "Version Y - Peri-encounter Task'\n\n"
+        "2. **Case Description**: A 2-4 sentence clinical vignette describing "
+        "the patient, their chief concern, and the clinical scenario.\n\n"
+        "3. **Learner Instructions**: A pre-filled clinical note template that "
+        "the student must complete. Structure it EXACTLY like this:\n"
+        "   - 'Learner instructions:' header\n"
+        "   - Instruction paragraph telling the student to complete the note "
+        "by documenting HPI, social history, summary statement, assessment, "
+        "and plan. State that the remainder has been provided, including "
+        "physical examination findings.\n"
+        "   - Pre-filled note template with:\n"
+        "     * Chief Concern: (filled in with patient's chief complaint)\n"
+        "     * History of Present Illness: _________ (blank for student)\n"
+        "     * Birth History / Past Medical History / Past Surgical History / "
+        "Allergies / Medications / Family History: (ALL filled in with "
+        "case-specific details)\n"
+        "     * Social History: _________ (blank for student)\n"
+        "     * Physical Examination: (filled in with complete, detailed "
+        "findings for all relevant systems — General, Eyes, HEENT, Cardiac, "
+        "Pulmonary, Abdominal, Neurological, Extremities, etc.)\n"
+        "     * Summary Statement: _________ (blank)\n"
+        "     * Assessment: _________ (blank)\n"
+        "     * Plan: _________ (blank)\n\n"
+        "4. **Sections** — each uses MILESTONE-BASED scoring (1-5 scale) with "
+        "CASE-SPECIFIC criteria. Each milestone level must list specific "
+        "clinical elements the student should include, NOT generic descriptors. "
+        "The criteria must reference actual clinical details from the case.\n\n"
+        "   a) **hpi** (PCIG, 5 pts) — History of Present Illness:\n"
+        "      - Use OPQRST-A framework (Onset, Provoking/Palliating, Quality, "
+        "Region/Radiation, Severity, Timing, Associated symptoms)\n"
+        "      - Each level specifies how many OPQRST elements are needed\n"
+        "      - List specific pertinent positives and negatives relevant to "
+        "the case (e.g., 'nausea', 'lightheadedness', 'no vomiting', "
+        "'no visual changes')\n"
+        "      - Entry (1): 1-2 OPQRST elements, no pertinent pos/neg\n"
+        "      - Early Developing (2): 4+ OPQRST, 1-2 associated symptoms\n"
+        "      - Mid-Developing (3): 6+ OPQRST, 1+ pertinent positive, "
+        "1+ pertinent negative\n"
+        "      - Advanced Developing (4): 6+ OPQRST, 1+ pertinent positive, "
+        "2+ pertinent negatives, additional relevant history\n"
+        "      - Aspirational (5): 8+ OPQRST, 2+ pertinent positives, "
+        "3+ pertinent negatives, patient concerns\n\n"
+        "   b) **social_hx** (PCIG, 5 pts) — Social History:\n"
+        "      - Use an appropriate social history framework for the patient "
+        "population (e.g., HEADSS for adolescents: Home, Education, "
+        "Activities, Drugs, Sexuality, Suicide/Safety; or for adults: "
+        "occupation, living situation, substance use, relationships, etc.)\n"
+        "      - Each level specifies how many framework elements are needed\n"
+        "      - List specific social history details relevant to the case\n"
+        "      - Entry (1): May omit social history entirely\n"
+        "      - Aspirational (5): Comprehensive coverage of all framework "
+        "elements with case-specific details\n\n"
+        "   c) **summary_statement** (PCDP, 5 pts) — Summary Statement:\n"
+        "      - Each level specifies required elements (age, gender, "
+        "presenting symptom, pertinent history using semantic qualifiers, "
+        "relevant PE findings, pertinent negatives)\n"
+        "      - List the specific semantic qualifiers relevant to the case\n"
+        "      - Higher levels require more pertinent history items and "
+        "pertinent negatives, with no irrelevant information\n\n"
+        "   d) **assessment** (PCDP, 5 pts) — Assessment:\n"
+        "      - Specify the correct primary working diagnosis for the case\n"
+        "      - List the specific differential diagnoses (3-4) with their "
+        "justifications/rationale based on case findings\n"
+        "      - Entry (1): single diagnosis, may be incorrect, no rationale\n"
+        "      - Mid-Developing (3): identifies correct primary diagnosis "
+        "with rationale + 1 differential\n"
+        "      - Aspirational (5): correct primary with thorough rationale + "
+        "2+ differentials with reasoning for why less likely\n\n"
+        "   e) **plan** (PCDP, 5 pts) — Plan:\n"
+        "      - List specific next steps relevant to the case (diagnostic "
+        "tests, treatments, counseling, follow-up)\n"
+        "      - Specify what interventions are inappropriate for this case\n"
+        "      - Higher levels include patient education, return precautions, "
+        "and follow-up arrangements\n\n"
+        "   f) **written_communication** (PCVW, 4 pts) — Written Communication:\n"
+        "      - This is the ONE section with generic (non-case-specific) "
+        "criteria about writing quality\n"
+        "      - Score levels: 4 = well-organized, clear, cohesive story; "
+        "3 = mostly well-organized; 2 = some disorganization; "
+        "1 = significant disorganization\n"
+        "      - Criteria cover: organization/cohesiveness, wordiness, "
+        "clarity, typos/grammar, appropriate terminology\n\n"
+        "5. **Model Answer**: Generate a COMPLETE top-scoring clinical note "
+        "with ALL sections filled in. Format with section headers:\n"
+        "   - HPI: (detailed, covering all OPQRST elements and pertinent "
+        "pos/neg)\n"
+        "   - Social History: (comprehensive coverage of the framework)\n"
+        "   - Summary Statement: (concise synthesis with semantic qualifiers)\n"
+        "   - Assessment: (prioritized differential with rationale)\n"
+        "   - Plan: (comprehensive with diagnostics, therapeutics, education, "
+        "follow-up)\n\n"
+        "6. **Milestone Score Table**: Include BOTH domain-specific AND "
+        "cumulative milestone mappings. Use these EXACT ranges:\n\n"
+        "   PCIG (HPI + Social History = 10 points possible):\n"
+        "   10 pts = Aspirational, 9 = Advanced Developing to Aspirational, "
+        "8 = Advanced Developing, 7 = Mid-Developing to Advanced Developing, "
+        "6 = Mid-Developing, 5 = Early Developing to Mid-Developing, "
+        "4 = Early Developing, 3 = Entry to Early Developing, 2 = Entry, "
+        "<2 = Behavior requiring corrective response\n\n"
+        "   PCDP (Summary + Assessment + Plan = 15 points possible):\n"
+        "   14-15 = Aspirational, 13 = Adv Dev to Aspirational, "
+        "11-12 = Adv Dev, 10 = Mid-Dev to Adv Dev, 8-9 = Mid-Dev, "
+        "7 = Early Dev to Mid-Dev, 5-6 = Early Dev, 4 = Entry to Early Dev, "
+        "3 = Entry, <3 = Behavior requiring corrective response\n\n"
+        "   PCVW (Written Communication = 4 points possible):\n"
+        "   4 = Advanced Developing, 3.5 = Mid-Dev to Adv Dev, 3 = Mid-Dev, "
+        "2.5 = Early Dev to Mid-Dev, 2 = Early Dev, 1.5 = Entry to Early Dev, "
+        "1 = Entry, 0 = Behavior requiring corrective response\n\n"
+        "   Cumulative (total across all 6 components = 29 points possible):\n"
+        f"{example_block}\n"
+        "Respond with ONLY valid JSON using this EXACT structure:\n"
+        "{\n"
+        '  "case_title": "Progress OSCE (Patient Name) Case X Version Y '
+        '- Peri-encounter Task",\n'
+        '  "case_description": "2-4 sentence clinical vignette...",\n'
+        '  "learner_instructions": "Full pre-filled note template with '
+        'completed sections and blanks for student to fill in...",\n'
+        '  "model_answer": "HPI:\\n[detailed HPI]\\n\\nSocial History:\\n'
+        '[comprehensive social history]\\n\\nSummary Statement:\\n[concise '
+        'synthesis]\\n\\nAssessment:\\n[prioritized differential]\\n\\nPlan:\\n'
+        '[comprehensive plan]",\n'
+        '  "sections": {\n'
+        '    "hpi": {\n'
+        '      "criteria": "HPI (PCIG): Case-specific OPQRST criteria...",\n'
+        '      "score_levels": {"5": "case-specific aspirational...", '
+        '"4": "...", "3": "...", "2": "...", "1": "..."}\n'
+        "    },\n"
+        '    "social_hx": {\n'
+        '      "criteria": "Social History (PCIG): Framework-specific...",\n'
+        '      "score_levels": {"5": "...", "4": "...", "3": "...", '
+        '"2": "...", "1": "..."}\n'
+        "    },\n"
+        '    "summary_statement": {\n'
+        '      "criteria": "Summary Statement (PCDP): ...",\n'
+        '      "score_levels": {"5": "...", "4": "...", "3": "...", '
+        '"2": "...", "1": "..."}\n'
+        "    },\n"
+        '    "assessment": {\n'
+        '      "criteria": "Assessment (PCDP): ...",\n'
+        '      "score_levels": {"5": "...", "4": "...", "3": "...", '
+        '"2": "...", "1": "..."}\n'
+        "    },\n"
+        '    "plan": {\n'
+        '      "criteria": "Plan (PCDP): ...",\n'
+        '      "score_levels": {"5": "...", "4": "...", "3": "...", '
+        '"2": "...", "1": "..."}\n'
+        "    },\n"
+        '    "written_communication": {\n'
+        '      "criteria": "Written Communication (PCVW): ...",\n'
+        '      "score_levels": {"4": "...", "3": "...", "2": "...", '
+        '"1": "..."}\n'
+        "    }\n"
+        "  },\n"
+        '  "score_table": [\n'
+        '    {"range": "28-29", "milestone": "Aspirational"},\n'
+        '    {"range": "25-27", "milestone": "Advanced Developing to Aspirational"},\n'
+        '    {"range": "23-24", "milestone": "Advanced Developing"},\n'
+        '    {"range": "19-22", "milestone": "Mid-Developing to Advanced Developing"},\n'
+        '    {"range": "17-18", "milestone": "Mid-Developing"},\n'
+        '    {"range": "13-16", "milestone": "Early Developing to Mid-Developing"},\n'
+        '    {"range": "11-12", "milestone": "Early Developing"},\n'
+        '    {"range": "7-10", "milestone": "Entry to Early Developing"},\n'
+        '    {"range": "6", "milestone": "Entry"}\n'
+        "  ]\n"
+        "}"
+    )
+
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
 def _build_rubric_generation_prompt(
     type_id: str,
     example_rubric_text: str | None = None,
@@ -615,6 +819,8 @@ def _build_rubric_generation_prompt(
         return _build_ipass_rubric_generation_prompt(example_rubric_text)
     if type_id == "kpsom_ethics":
         return _build_ethics_rubric_generation_prompt(example_rubric_text)
+    if type_id == "kpsom_documentation":
+        return _build_documentation_rubric_generation_prompt(example_rubric_text)
 
     meta = _TYPE_META[type_id]
     sections_desc = "\n".join(
