@@ -7,3 +7,14 @@ python-docx>=0.8.11
 pdfminer.six>=20221105
 pytest>=7.0.0
 streamlit>=1.30
+numpy>=1.24.0
+scipy>=1.10.0
+pingouin>=0.5.0
+irrCAC
+krippendorff
+generalizit
+factor-analyzer>=0.5.0
+scikit-learn>=1.0
+pyCompare
+statsmodels>=0.14.0
+matplotlib>=3.7.0

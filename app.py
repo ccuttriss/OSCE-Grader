@@ -56,6 +56,12 @@ from gold_standard import (
     GoldStandardBenchmark,
     BiasAnalysisResult,
     ConsensusResult,
+    _MAX_SCORES,
+)
+from psychometrics import (
+    run_psychometric_analysis,
+    pool_session_scores,
+    PsychometricBundle,
 )
 from synthetic_generator import (
     generate_rubric,
@@ -1808,7 +1814,266 @@ def tab_gold_standard():
                 for rec in bias.recommendations:
                     st.markdown(f"- {rec}")
 
-    # --- Step 4: Faculty Review & Benchmark Input ---
+    # --- Step 4: Psychometric Analysis ---
+    st.divider()
+    st.subheader("Psychometric Analysis")
+    st.caption(
+        "Comprehensive psychometric evaluation of rubric items and score distributions. "
+        "Modules requiring per-rater or demographic data show instructions for uploading."
+    )
+
+    max_scores = _MAX_SCORES.get(gs_type_id, {})
+    psych_bundle = None
+
+    if "gs_sessions" in st.session_state:
+        try:
+            psych_bundle = run_psychometric_analysis(
+                sessions, stats.sections, max_scores,
+            )
+            st.session_state["gs_psychometrics"] = psych_bundle
+        except Exception as exc:
+            st.warning(f"Psychometric analysis failed: {exc}")
+
+    if psych_bundle:
+        ptabs = st.tabs([
+            "Item Analysis",
+            "Distribution",
+            "Clustering",
+            "Inter-Rater Reliability",
+            "G-Theory",
+            "Agreement",
+            "DIF",
+        ])
+
+        # --- Item Analysis Tab ---
+        with ptabs[0]:
+            ia = psych_bundle.item_analysis
+            if ia and ia.item_difficulty:
+                st.markdown(f"**Overall Cronbach's Alpha:** {ia.overall_alpha:.3f}")
+
+                ia_rows = []
+                for sec in stats.sections:
+                    row = {"Section": sec}
+                    row["Difficulty (p)"] = ia.item_difficulty.get(sec, "")
+                    row["Discrimination (D)"] = ia.item_discrimination.get(sec, "")
+                    pb = ia.point_biserial.get(sec, {})
+                    row["Point-Biserial (r)"] = pb.get("r_pb", "")
+                    row["Alpha-if-Deleted"] = ia.alpha_if_deleted.get(sec, "")
+                    ia_rows.append(row)
+                st.dataframe(pd.DataFrame(ia_rows), use_container_width=True, hide_index=True)
+
+                # Interpretation guide
+                with st.expander("Interpretation Guide"):
+                    st.markdown("""
+**Item Difficulty (p):** Mean score / max possible. Range 0-1.
+- 0.30-0.70 = ideal discriminating range
+- > 0.90 = too easy (ceiling effect)
+- < 0.15 = too hard (floor effect)
+
+**Discrimination (D-index):** Difference in mean scores between top 27% and bottom 27% of students.
+- >= 0.30 = good
+- 0.20-0.29 = acceptable
+- < 0.20 = poor (item doesn't differentiate)
+
+**Point-Biserial (r):** Correlation between section score and total score (minus that section).
+- >= 0.30 = good
+- 0.20-0.29 = acceptable
+- < 0.15 = review item
+
+**Alpha-if-Deleted:** If removing this section *increases* alpha, the section may be measuring something different from the rest.
+                    """)
+
+                if ia.flags:
+                    st.warning(f"**{len(ia.flags)} items flagged for review:**")
+                    for flag in ia.flags:
+                        st.markdown(f"- **{flag['section']}** ({flag['issue']}): {flag['detail']}")
+            else:
+                st.info("Insufficient data for item analysis (need >= 5 students).")
+
+        # --- Distribution Tab ---
+        with ptabs[1]:
+            dist = psych_bundle.distribution
+            if dist and dist.skewness:
+                dist_rows = []
+                for sec in stats.sections:
+                    row = {"Section": sec}
+                    row["Skewness"] = dist.skewness.get(sec, "")
+                    row["Kurtosis"] = dist.kurtosis.get(sec, "")
+                    row["Ceiling %"] = dist.ceiling_pct.get(sec, "")
+                    row["Floor %"] = dist.floor_pct.get(sec, "")
+                    nt = dist.normality_tests.get(sec, {})
+                    row["Shapiro-Wilk p"] = nt.get("shapiro_p", "")
+                    row["Normal?"] = "Yes" if nt.get("is_normal") else "No"
+                    dist_rows.append(row)
+                st.dataframe(pd.DataFrame(dist_rows), use_container_width=True, hide_index=True)
+
+                with st.expander("Interpretation Guide"):
+                    st.markdown("""
+**Skewness:** Measures distribution asymmetry.
+- Negative = scores pile up at the top (ceiling tendency)
+- Positive = scores pile up at the bottom (floor tendency)
+- |skew| > 1.0 = substantial, > 2.0 = severe
+
+**Ceiling/Floor %:** Percentage of students at max/min score.
+- > 15% = flagged (reduces score variability and reliability)
+
+**Shapiro-Wilk:** Tests for normal distribution (p > 0.05 = normal).
+Non-normality affects interpretation of means and standard deviations.
+                    """)
+
+                if dist.flags:
+                    st.warning(f"**{len(dist.flags)} distributional issues found:**")
+                    for flag in dist.flags:
+                        st.markdown(f"- **{flag['section']}** ({flag['issue']}): {flag['detail']}")
+            else:
+                st.info("Insufficient data for distribution analysis.")
+
+        # --- Clustering Tab ---
+        with ptabs[2]:
+            cl = psych_bundle.clusters
+            if cl and cl.n_clusters > 0:
+                ccol1, ccol2 = st.columns(2)
+                ccol1.metric("Clusters Found", cl.n_clusters)
+                ccol2.metric("Silhouette Score", f"{cl.silhouette_score:.3f}")
+
+                # Cluster profiles table
+                profile_rows = []
+                for cid in range(cl.n_clusters):
+                    row = {"Cluster": f"Cluster {cid + 1}", "Size": cl.cluster_sizes.get(cid, 0)}
+                    for sec in stats.sections:
+                        row[sec] = cl.cluster_profiles.get(cid, {}).get(sec, "")
+                    profile_rows.append(row)
+                st.dataframe(pd.DataFrame(profile_rows), use_container_width=True, hide_index=True)
+
+                for interp in cl.interpretation:
+                    st.markdown(f"- {interp}")
+
+                with st.expander("Interpretation Guide"):
+                    st.markdown("""
+**Silhouette Score:** Measures cluster quality (range -1 to 1).
+- > 0.5 = strong structure
+- 0.25-0.5 = reasonable structure
+- < 0.25 = weak/overlapping clusters
+
+Clusters reveal performance archetypes — e.g., students strong in clinical
+reasoning but weak in communication, or vice versa. This informs targeted
+remediation strategies.
+                    """)
+            else:
+                st.info("Insufficient data for clustering (need >= 4 students).")
+
+        # --- IRR Tab ---
+        with ptabs[3]:
+            if psych_bundle.irr and psych_bundle.irr.icc_results:
+                irr = psych_bundle.irr
+                irr_rows = []
+                for sec in stats.sections:
+                    row = {"Section": sec}
+                    icc = irr.icc_results.get(sec, {})
+                    row["ICC(2,1)"] = icc.get("value", "")
+                    row["95% CI"] = (
+                        f"[{icc.get('ci_low', '')}, {icc.get('ci_high', '')}]"
+                        if icc else ""
+                    )
+                    row["Cohen's Kappa"] = irr.cohens_kappa.get(sec, "")
+                    row["Krippendorff Alpha"] = irr.krippendorff_alpha.get(sec, "")
+                    row["Interpretation"] = irr.interpretation.get(sec, "")
+                    irr_rows.append(row)
+                st.dataframe(pd.DataFrame(irr_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info(
+                    "Inter-rater reliability requires per-rater data "
+                    "(multiple faculty scoring the same students). "
+                    "Upload a rater-level Excel file with columns: "
+                    "[student_id, rater_id, section1, section2, ...]"
+                )
+
+        # --- G-Theory Tab ---
+        with ptabs[4]:
+            if psych_bundle.g_theory and psych_bundle.g_theory.variance_components:
+                gt = psych_bundle.g_theory
+                gcol1, gcol2, gcol3 = st.columns(3)
+                gcol1.metric("Relative G", f"{gt.relative_g_coefficient:.3f}")
+                gcol2.metric("Absolute G", f"{gt.absolute_g_coefficient:.3f}")
+                gcol3.metric("SEM", f"{gt.sem:.3f}")
+
+                # Variance components table
+                vc_rows = [
+                    {"Source": k, "Variance": v}
+                    for k, v in gt.variance_components.items()
+                ]
+                st.dataframe(pd.DataFrame(vc_rows), use_container_width=True, hide_index=True)
+
+                # D-study
+                if gt.d_study:
+                    st.markdown("**Decision Study:** Projected G-coefficient by number of raters")
+                    ds_rows = [
+                        {"Raters": k, "Relative G": v}
+                        for k, v in sorted(gt.d_study.items())
+                    ]
+                    st.dataframe(pd.DataFrame(ds_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info(
+                    "Generalizability Theory requires per-rater data "
+                    "(person x rater x item design). Upload a rater-level "
+                    "Excel file to enable this analysis."
+                )
+
+        # --- Agreement Tab ---
+        with ptabs[5]:
+            if psych_bundle.agreement and psych_bundle.agreement.mean_diff:
+                ag = psych_bundle.agreement
+                ag_rows = []
+                for sec in stats.sections:
+                    row = {"Section": sec}
+                    row["Mean Diff (bias)"] = ag.mean_diff.get(sec, "")
+                    row["SD of Diff"] = ag.sd_diff.get(sec, "")
+                    row["LoA Lower"] = ag.loa_lower.get(sec, "")
+                    row["LoA Upper"] = ag.loa_upper.get(sec, "")
+                    row["Within LoA %"] = ag.within_loa_pct.get(sec, "")
+                    row["SEM"] = ag.sem.get(sec, "")
+                    row["Proportional Bias"] = (
+                        "Yes" if ag.proportional_bias.get(sec) else "No"
+                    )
+                    ag_rows.append(row)
+                st.dataframe(pd.DataFrame(ag_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info(
+                    "Agreement analysis compares AI grader scores vs faculty scores. "
+                    "Run grading on this assessment first, then load the results here "
+                    "to see Bland-Altman agreement statistics."
+                )
+
+        # --- DIF Tab ---
+        with ptabs[6]:
+            if psych_bundle.dif and psych_bundle.dif.mh_results:
+                dif = psych_bundle.dif
+                dif_rows = []
+                for sec in stats.sections:
+                    mh = dif.mh_results.get(sec, {})
+                    lr = dif.logistic_results.get(sec, {})
+                    row = {"Section": sec}
+                    row["MH Chi-sq"] = mh.get("chi2", "")
+                    row["MH p-value"] = mh.get("p_value", "")
+                    row["MH Delta"] = mh.get("mh_delta", "")
+                    row["ETS Class"] = mh.get("ets_class", "")
+                    row["Uniform DIF p"] = lr.get("uniform_p", "")
+                    row["Non-uniform DIF p"] = lr.get("nonuniform_p", "")
+                    dif_rows.append(row)
+                st.dataframe(pd.DataFrame(dif_rows), use_container_width=True, hide_index=True)
+
+                if dif.flagged_items:
+                    st.warning(f"**{len(dif.flagged_items)} items flagged for DIF:**")
+                    for flag in dif.flagged_items:
+                        st.markdown(f"- **{flag['section']}**: {flag['detail']}")
+            else:
+                st.info(
+                    "Differential Item Functioning analysis checks if items function "
+                    "differently across student subgroups (e.g., by gender or site). "
+                    "Upload a demographics CSV with columns [student_id, group] to enable."
+                )
+
+    # --- Step 5: Faculty Review & Benchmark Input ---
     st.divider()
     st.subheader("Establish Gold Standard Benchmarks")
     st.caption(
@@ -1893,7 +2158,139 @@ def tab_gold_standard():
         )
 
         excel_bytes = generate_benchmark_excel(benchmark)
+
+        # Add psychometric sheets to the Excel workbook
+        psych = st.session_state.get("gs_psychometrics")
+        if psych:
+            from openpyxl import load_workbook
+            import io as _io
+            wb = load_workbook(filename=_io.BytesIO(excel_bytes))
+
+            # Sheet 5: Item Analysis
+            if psych.item_analysis and psych.item_analysis.item_difficulty:
+                ws_ia = wb.create_sheet("Item Analysis")
+                ws_ia.append([
+                    "Section", "Difficulty (p)", "Discrimination (D)",
+                    "Point-Biserial (r)", "Alpha-if-Deleted",
+                ])
+                ia = psych.item_analysis
+                for sec in stats.sections:
+                    pb = ia.point_biserial.get(sec, {})
+                    ws_ia.append([
+                        sec,
+                        ia.item_difficulty.get(sec),
+                        ia.item_discrimination.get(sec),
+                        pb.get("r_pb"),
+                        ia.alpha_if_deleted.get(sec),
+                    ])
+                ws_ia.append([])
+                ws_ia.append(["Overall Cronbach's Alpha", ia.overall_alpha])
+                if ia.flags:
+                    ws_ia.append([])
+                    ws_ia.append(["Flagged Items"])
+                    for flag in ia.flags:
+                        ws_ia.append([flag["section"], flag["issue"], flag["detail"]])
+
+            # Sheet 6: Distribution
+            if psych.distribution and psych.distribution.skewness:
+                ws_dist = wb.create_sheet("Distribution")
+                ws_dist.append([
+                    "Section", "Skewness", "Kurtosis",
+                    "Ceiling %", "Floor %", "Shapiro-Wilk p", "Normal?",
+                ])
+                dist = psych.distribution
+                for sec in stats.sections:
+                    nt = dist.normality_tests.get(sec, {})
+                    ws_dist.append([
+                        sec,
+                        dist.skewness.get(sec),
+                        dist.kurtosis.get(sec),
+                        dist.ceiling_pct.get(sec),
+                        dist.floor_pct.get(sec),
+                        nt.get("shapiro_p"),
+                        "Yes" if nt.get("is_normal") else "No",
+                    ])
+                if dist.flags:
+                    ws_dist.append([])
+                    ws_dist.append(["Flagged Issues"])
+                    for flag in dist.flags:
+                        ws_dist.append([flag["section"], flag["issue"], flag["detail"]])
+
+            # Sheet 7: Clusters
+            if psych.clusters and psych.clusters.n_clusters > 0:
+                ws_cl = wb.create_sheet("Clusters")
+                cl = psych.clusters
+                ws_cl.append(["Response Pattern Clustering"])
+                ws_cl.append(["Clusters Found", cl.n_clusters])
+                ws_cl.append(["Silhouette Score", round(cl.silhouette_score, 3)])
+                ws_cl.append([])
+                ws_cl.append(["Cluster", "Size"] + list(stats.sections))
+                for cid in range(cl.n_clusters):
+                    row = [f"Cluster {cid + 1}", cl.cluster_sizes.get(cid, 0)]
+                    for sec in stats.sections:
+                        row.append(cl.cluster_profiles.get(cid, {}).get(sec))
+                    ws_cl.append(row)
+                ws_cl.append([])
+                for interp in cl.interpretation:
+                    ws_cl.append([interp])
+
+            buf = _io.BytesIO()
+            wb.save(buf)
+            excel_bytes = buf.getvalue()
+
         json_str = generate_benchmark_json(benchmark)
+
+        # Add psychometric data to JSON export
+        if psych:
+            import json as _json
+            json_data = _json.loads(json_str)
+            json_data["psychometrics"] = {}
+
+            if psych.item_analysis and psych.item_analysis.item_difficulty:
+                ia = psych.item_analysis
+                json_data["psychometrics"]["item_analysis"] = {
+                    "overall_alpha": ia.overall_alpha,
+                    "items": {
+                        sec: {
+                            "difficulty": ia.item_difficulty.get(sec),
+                            "discrimination": ia.item_discrimination.get(sec),
+                            "point_biserial": ia.point_biserial.get(sec, {}).get("r_pb"),
+                            "alpha_if_deleted": ia.alpha_if_deleted.get(sec),
+                        }
+                        for sec in stats.sections
+                    },
+                    "flags": ia.flags,
+                }
+
+            if psych.distribution and psych.distribution.skewness:
+                dist = psych.distribution
+                json_data["psychometrics"]["distribution"] = {
+                    "sections": {
+                        sec: {
+                            "skewness": dist.skewness.get(sec),
+                            "kurtosis": dist.kurtosis.get(sec),
+                            "ceiling_pct": dist.ceiling_pct.get(sec),
+                            "floor_pct": dist.floor_pct.get(sec),
+                            "normality": dist.normality_tests.get(sec, {}),
+                        }
+                        for sec in stats.sections
+                    },
+                    "flags": dist.flags,
+                }
+
+            if psych.clusters and psych.clusters.n_clusters > 0:
+                cl = psych.clusters
+                json_data["psychometrics"]["clusters"] = {
+                    "n_clusters": cl.n_clusters,
+                    "silhouette_score": cl.silhouette_score,
+                    "profiles": {
+                        str(k): v for k, v in cl.cluster_profiles.items()
+                    },
+                    "sizes": {str(k): v for k, v in cl.cluster_sizes.items()},
+                    "interpretation": cl.interpretation,
+                }
+
+            json_str = _json.dumps(json_data, indent=2)
 
         st.session_state["gs_excel"] = excel_bytes
         st.session_state["gs_json"] = json_str
