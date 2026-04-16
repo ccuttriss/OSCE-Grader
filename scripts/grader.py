@@ -956,31 +956,16 @@ def main() -> None:
         raise SystemExit(1)
 
     # --- Initialise the LLM caller ---
-    caller = create_caller(args.provider)
+    caller = create_caller(args.provider, model)
     logger.info("Provider: %s | Model: %s", args.provider, model)
 
     rubric_content, answer_key_content = read_rubric_and_key(
         args.rubric, args.answer_key
     )
 
-    from identity import cli_stub_user
-    stub = cli_stub_user()
-    import uuid
-    ctx = RunContext(
-        run_id=str(uuid.uuid4()),
-        actor_email=stub.email,
-        actor_role=stub.role,
-        auth_session_id=stub.session_id,
-        provider=args.provider,
-        model=model,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        workers=args.workers,
-        max_tokens=config.MAX_TOKENS,
-        assessment_type=args.assessment_type if hasattr(args, "assessment_type") else "uk_osce",
-        sections=list(config.SECTIONS),
-    )
-
+    # Note: the CLI grader uses the legacy process_excel_file_with_key path which
+    # doesn't consume a RunContext. Local `model` and argparse values drive it
+    # directly. A future change can thread RunContext through that legacy path.
     process_excel_file_with_key(
         caller,
         args.notes,
