@@ -1245,6 +1245,20 @@ def tab_flagged():
 # TAB 4: CONVERT RUBRIC
 # =========================================================================
 def tab_convert():
+    user = identity.get_current_user()
+    if not identity.is_admin(user):
+        import audit
+        audit.log_event(
+            "tab.access.denied",
+            stream="user",
+            actor=user,
+            severity="warn",
+            outcome="denied",
+            target_kind="tab",
+            target_id="convert",
+        )
+        st.error("This tab requires admin privileges.")
+        return
     st.header("Convert Rubric")
     st.markdown(
         "Upload a PDF or DOCX rubric and the AI will parse it into section columns "
@@ -1371,6 +1385,20 @@ def tab_convert():
 # TAB 5: GOLD STANDARD ANALYSIS
 # =========================================================================
 def tab_gold_standard():
+    user = identity.get_current_user()
+    if not identity.is_admin(user):
+        import audit
+        audit.log_event(
+            "tab.access.denied",
+            stream="user",
+            actor=user,
+            severity="warn",
+            outcome="denied",
+            target_kind="tab",
+            target_id="gold_standard",
+        )
+        st.error("This tab requires admin privileges.")
+        return
     st.header("Gold Standard Analysis")
     st.markdown(
         "Upload 2\u201310 faculty score files from different administrations of the same "
@@ -1936,6 +1964,20 @@ def tab_gold_standard():
 
 
 def tab_synthetic_generator():
+    user = identity.get_current_user()
+    if not identity.is_admin(user):
+        import audit
+        audit.log_event(
+            "tab.access.denied",
+            stream="user",
+            actor=user,
+            severity="warn",
+            outcome="denied",
+            target_kind="tab",
+            target_id="synthetic",
+        )
+        st.error("This tab requires admin privileges.")
+        return
     st.header("Synthetic Data Generator")
     st.markdown(
         "Generate realistic, end-to-end OSCE test data using independent LLM agents. "
