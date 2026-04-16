@@ -21,7 +21,7 @@ DB_PATH = os.path.join(
     "osce_grader.db",
 )
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 # ---------------------------------------------------------------------------
 # Connection management
@@ -177,19 +177,50 @@ CREATE TABLE IF NOT EXISTS material_tags (
 """
 
 
+def _apply_migration_v4(conn: sqlite3.Connection) -> None:
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(grading_runs)").fetchall()]
+    adds = [
+        ("run_uuid",                "TEXT"),
+        ("user_email",              "TEXT"),
+        ("auth_session_id",         "TEXT"),
+        ("provider",                "TEXT"),
+        ("top_p",                   "REAL"),
+        ("workers",                 "INTEGER"),
+        ("max_tokens",              "INTEGER"),
+        ("sections_json",           "TEXT"),
+        ("rubric_material_id",      "INTEGER"),
+        ("answer_key_material_id",  "INTEGER"),
+        ("student_notes_sha256",    "TEXT"),
+        ("summary_json",            "TEXT"),
+        ("results_sha256",          "TEXT"),
+    ]
+    for name, typ in adds:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE grading_runs ADD COLUMN {name} {typ}")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_grading_runs_run_uuid "
+        "ON grading_runs(run_uuid) WHERE run_uuid IS NOT NULL"
+    )
+
+
 def init_db() -> None:
     """Create tables if they don't exist. Idempotent."""
     with get_connection() as conn:
         conn.executescript(_SCHEMA_SQL)
-        row = conn.execute(
-            "SELECT MAX(version) FROM schema_version"
+        current_row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version"
         ).fetchone()
-        if row[0] is None:
+        current = current_row[0]
+        if current < 4:
+            _apply_migration_v4(conn)
+        if current < CURRENT_SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?)",
                 (CURRENT_SCHEMA_VERSION,),
             )
-            logger.info("Database initialized at version %d", CURRENT_SCHEMA_VERSION)
+            logger.info(
+                "Database migrated from v%d to v%d", current, CURRENT_SCHEMA_VERSION,
+            )
 
 
 # ---------------------------------------------------------------------------
