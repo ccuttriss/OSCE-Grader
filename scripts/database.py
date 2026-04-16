@@ -16,10 +16,11 @@ from typing import Optional
 
 logger = logging.getLogger("osce_grader.database")
 
-DB_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "osce_grader.db",
-)
+def _default_db_path() -> str:
+    import server_env
+    return server_env.db_path()
+
+DB_PATH = _default_db_path()
 
 CURRENT_SCHEMA_VERSION = 4
 
