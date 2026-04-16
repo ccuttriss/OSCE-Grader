@@ -68,8 +68,11 @@ Persistence (existing SQLite + new tables/dirs)
   scripts/database.py           — existing, with new table creation
   osce_grader.db:
     existing tables (api_keys, rubrics, rubric_sections, synthetic_sessions, example_files, grading_runs)
-    + audit_events
-    + materials, material_tags
+      — rubrics/rubric_sections/synthetic_sessions/example_files stay as-is;
+        they are the synthetic-generator domain and are not merged into materials
+    + audit_events                                — new
+    + materials, material_tags                    — new
+    grading_runs: existing columns preserved; new columns added (§6.2)
   storage/materials/<ab>/<cd>/<sha256>.<ext>   — content-addressed uploads
   storage/results/<sha256>.xlsx                — grading-run output artifacts
 ```
@@ -125,7 +128,7 @@ Two roles: `end_user` and `admin`. Admin membership is configured via `OSCE_ADMI
 - **End-user tabs:** Grade Notes, Analysis Dashboard, Flagged Items, Source Materials.
 - **Admin-only tabs:** Convert Rubric, Gold Standard, Synthetic Data, Audit Log.
 
-A non-admin who attempts to reach an admin-only action (e.g., via a URL parameter trick) sees a denial message and a `tab.access.denied` audit event is emitted with severity `warn`.
+Streamlit's tab UI is session-local, so hidden tabs are not URL-addressable; role gating at the dispatcher is the primary defense. Each admin tab handler additionally asserts `is_admin(user)` at entry for defense-in-depth, and any failure emits a `tab.access.denied` user-stream event with severity `warn`.
 
 ### 3.6 CLI identity
 
@@ -293,6 +296,10 @@ Sharded 2×2 hex levels to keep per-directory file counts small. Files are conte
 - `rubric`, `answer_key`, `exemplar`: canonical library items; reuse across runs is the default.
 - `student_notes`: **not added to the library by default**. Per-run upload only, hashed, referenced by the `grading_runs` row, retained for the per-run artifact lifetime (§6.4). Faculty can **opt in** at upload time to keep a student-notes file in the library (e.g., for re-runs); the opt-in is per upload and audited.
 
+### 5.3.1 Relationship to existing `example_files` and `rubrics` tables
+
+The existing `example_files` table (used by the synthetic generator) and the existing `rubrics` / `rubric_sections` tables (structured rubric content for synthetic sessions) are **not merged** into `materials`. They serve the admin-only synthetic-generator workflow and use a different shape (BLOB storage, structured section metadata). `materials` is the user-facing library for uploaded grading artifacts. Keeping them separate avoids conflating two different domain concepts and requires no risky data migration; a future pass could consolidate if it proves warranted.
+
 ### 5.4 Interface
 
 ```python
@@ -357,17 +364,22 @@ class RunContext:
 
 `grader.process_assessment(ctx, rubric, answer_key, notes_df)` takes a `RunContext` and returns results. No module-level state is mutated. `config.py` keeps default values only; callers build a `RunContext` from session state + library selections per run. The CLI grader builds one from argparse.
 
-### 6.2 `grading_runs` table expansion
+### 6.2 `grading_runs` table additions
 
-Extend the existing `grading_runs` schema (or migrate if it already exists) to include:
+The existing `grading_runs` table is preserved (see `scripts/database.py`: `run_id`, `assessment_type_id`, `rubric_id`, `model_used`, `temperature`, `source_type`, `session_id` FK to `synthetic_sessions`, `started_at`, `completed_at`, `status`, `results_json`, `log_text`). The existing `rubric_id` references the synthetic-generator `rubrics` table and stays as-is for synthetic-run compatibility. Add the following **new columns** via a schema migration (all nullable for backward compatibility with historical rows):
 
-- `id` (UUID; replaces any autoincrement id), `user_email`, `session_id`
-- `started_at`, `completed_at`, `status` (`running|complete|failed|cancelled`)
-- `rubric_material_id`, `answer_key_material_id`, `student_notes_sha256`
-- `provider`, `model`, `temperature`, `top_p`, `workers`, `max_tokens`
-- `assessment_type`, `sections_json`
-- `summary_json` (counts, mean score, token totals, cost estimate)
-- `results_sha256` (hash of the output xlsx)
+- `run_uuid` (TEXT, unique) — user-facing id, referenced by audit rows as `detail_json.run_id`
+- `user_email` (TEXT) — actor for the run
+- `auth_session_id` (TEXT) — identity session; distinct from the existing `session_id` column, which is a FK to `synthetic_sessions`
+- `provider` (TEXT), `top_p` (REAL), `workers` (INTEGER), `max_tokens` (INTEGER) — supplement existing `model_used` / `temperature`
+- `sections_json` (TEXT)
+- `rubric_material_id` (INTEGER, nullable FK to `materials(id)`) — set for uploaded runs; left NULL for synthetic runs that use `rubrics.rubric_id`
+- `answer_key_material_id` (INTEGER, nullable FK to `materials(id)`)
+- `student_notes_sha256` (TEXT) — per-run hash, not a library FK unless the user opted in
+- `summary_json` (TEXT) — counts, mean score, token totals, cost estimate
+- `results_sha256` (TEXT) — hash of the output xlsx; the file lives at `$OSCE_STORAGE_DIR/results/<sha256>.xlsx`
+
+Migration details (DB `CURRENT_SCHEMA_VERSION` bump, `ALTER TABLE ... ADD COLUMN` statements, and a `db.migration` system-stream audit row) are captured in the implementation plan.
 
 ### 6.3 Results artifacts
 
@@ -430,7 +442,7 @@ None required — `actor_email`, `actor_role`, and `session_id` already carry wh
 ### 8.3 Config additions (future)
 
 - `OSCE_AUTH_MODE` (`email|saml`, default `email`).
-- `OSCE_SAML_METADATA_URL`, `OSCE_SAML_ENTITY_ID`, `OSCE_SAML_ACS_URL`, `OSCE_SAML_IDP_CERT` (or proxy-equivalent env).
+- `OSCE_SAML_METADATA_URL`, `OSCE_SAML_ENTITY_ID`, `OSCE_SAML_ACS_URL`, and either `OSCE_SAML_IDP_CERT` or reliance on the IdP certificate fetched from the metadata URL (or proxy-equivalent env).
 - `OSCE_ADMIN_GROUP` (SAML group claim name that maps to `admin` role).
 
 ### 8.4 Rollout notes (future)
