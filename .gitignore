@@ -9,3 +9,5 @@ synthetic_data/
 uploads_tmp/
 osce_grader.db
 examples/
+.worktrees/
+.superpowers/
