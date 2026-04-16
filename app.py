@@ -790,6 +790,7 @@ def tab_grade_notes():
                     status.update(label=f"Grading student {current + 1} of {total}...")
                     status.write(f"Processing student {current + 1}...")
 
+            user = identity.get_current_user()
             ctx = run_context_from_streamlit(
                 provider=provider,
                 model=selected_model,
@@ -799,6 +800,9 @@ def tab_grade_notes():
                 max_tokens=config.MAX_TOKENS,
                 assessment_type=selected_type_id,
                 sections=sections,
+                actor_email=user.email,
+                actor_role=user.role,
+                auth_session_id=user.session_id,
             )
 
             try:
