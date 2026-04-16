@@ -7,6 +7,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+RUN adduser --system --group --no-create-home osce \
+    && mkdir -p /data \
+    && chown -R osce:osce /app /data
+
+USER osce
+
 ENV OSCE_DATA_DIR=/data
 ENV OSCE_SERVER_MODE=1
 ENV OSCE_LOG_JSON=1
