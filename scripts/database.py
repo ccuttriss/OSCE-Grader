@@ -222,6 +222,20 @@ def init_db() -> None:
             logger.info(
                 "Database migrated from v%d to v%d", current, CURRENT_SCHEMA_VERSION,
             )
+            try:
+                from audit import log_event
+                log_event(
+                    "db.migration",
+                    stream="system",
+                    severity="info",
+                    detail={"from": current, "to": CURRENT_SCHEMA_VERSION},
+                )
+            except Exception:
+                # Audit emission is best-effort during bootstrap; swallow if
+                # the audit module isn't importable (e.g., during schema init
+                # itself before tables exist on a fresh DB). log_event already
+                # has its own never-raise guard, but this catches import errors.
+                pass
 
 
 # ---------------------------------------------------------------------------
