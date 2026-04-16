@@ -99,6 +99,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 from audit import log_event
+if not st.session_state.get("_osce_app_start_logged"):
+    log_event("app.start", stream="system", severity="info", detail={"surface": "streamlit"})
+    st.session_state["_osce_app_start_logged"] = True
 import server_env
 if server_env.server_mode():
     from audit import schedule_daily_sweep, retention_sweep
