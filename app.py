@@ -455,22 +455,86 @@ def tab_grade_notes():
                 use_synthetic = False
 
     # --- Dynamic file uploads (shown when not using synthetic data) ---
+    import material_library as ml
     required_files = assessment_type.get_required_files()
     uploaded_files = {}
     detected_sections = []
 
+    # Library pickers for rubric and answer key
+    rubric_choice = None
+    ak_choice = None
+    keep_in_library = False
+
     if not use_synthetic:
-        file_cols = st.columns(len(required_files))
-        for i, file_spec in enumerate(required_files):
-            with file_cols[i]:
-                label = file_spec["label"]
-                if not file_spec.get("required", True):
-                    label += " (optional)"
-                uploaded_files[file_spec["key"]] = st.file_uploader(
-                    label,
-                    type=file_spec["types"],
-                    key=f"upload_{file_spec['key']}",
-                )
+        # --- Library pickers for rubric and answer key ---
+        rubric_options = ml.list_materials(kind="rubric", assessment_type=selected_type_id)
+        answer_options = ml.list_materials(kind="answer_key", assessment_type=selected_type_id)
+
+        rubric_choice = st.selectbox(
+            "Rubric (from library)",
+            options=[None] + rubric_options,
+            format_func=lambda m: "(upload below)" if m is None else f"{m.display_name} ({m.uploaded_at[:10]})",
+            key="gn_rubric_pick",
+        )
+        ak_choice = st.selectbox(
+            "Answer key (from library)",
+            options=[None] + answer_options,
+            format_func=lambda m: "(upload below)" if m is None else f"{m.display_name} ({m.uploaded_at[:10]})",
+            key="gn_ak_pick",
+        )
+
+        with st.expander("…or upload a new rubric / answer key"):
+            col1, col2 = st.columns(2)
+            with col1:
+                nr = st.file_uploader("Rubric", key="gn_rubric_new", type=["xlsx", "csv", "pdf", "docx"])
+                if nr is not None:
+                    _user = identity.get_current_user()
+                    ml.save_material(
+                        "rubric", file=nr, filename=nr.name,
+                        display_name=f"(inline) {nr.name}", assessment_type=selected_type_id,
+                        uploaded_by=_user.email,
+                    )
+                    st.rerun()
+            with col2:
+                na = st.file_uploader("Answer key", key="gn_ak_new", type=["xlsx", "csv"])
+                if na is not None:
+                    _user = identity.get_current_user()
+                    ml.save_material(
+                        "answer_key", file=na, filename=na.name,
+                        display_name=f"(inline) {na.name}", assessment_type=selected_type_id,
+                        uploaded_by=_user.email,
+                    )
+                    st.rerun()
+
+        st.divider()
+
+        # --- Remaining file uploaders (responses / faculty scores / etc.) ---
+        other_file_specs = [fs for fs in required_files if fs["key"] not in ("rubric", "answer_key")]
+        if other_file_specs:
+            file_cols = st.columns(len(other_file_specs))
+            for i, file_spec in enumerate(other_file_specs):
+                with file_cols[i]:
+                    label = file_spec["label"]
+                    if not file_spec.get("required", True):
+                        label += " (optional)"
+                    uploaded_files[file_spec["key"]] = st.file_uploader(
+                        label,
+                        type=file_spec["types"],
+                        key=f"upload_{file_spec['key']}",
+                    )
+
+        # Keep rubric/answer_key uploaders in uploaded_files as None (satisfied by picker)
+        for fs in required_files:
+            if fs["key"] in ("rubric", "answer_key"):
+                uploaded_files.setdefault(fs["key"], None)
+
+        # keep_in_library checkbox for student notes
+        keep_in_library = st.checkbox(
+            "Keep this student-notes file in the library",
+            value=False,
+            help="Check this box only if you want to re-run this file later. Student notes often contain PII.",
+            key="gn_keep_notes",
+        )
 
         # --- Previews ---
         for file_spec in required_files:
@@ -585,7 +649,15 @@ def tab_grade_notes():
     def _validate():
         if not use_synthetic:
             for file_spec in required_files:
-                if file_spec.get("required", True) and not uploaded_files.get(file_spec["key"]):
+                key = file_spec["key"]
+                if not file_spec.get("required", True):
+                    continue
+                # rubric/answer_key may be satisfied by library picker
+                if key == "rubric" and rubric_choice is not None:
+                    continue
+                if key == "answer_key" and ak_choice is not None:
+                    continue
+                if not uploaded_files.get(key):
                     st.error(f"Please upload: {file_spec['label']}")
                     return False
         if not has_env_key and not api_key_input:
@@ -598,16 +670,53 @@ def tab_grade_notes():
         if api_key_input and not has_env_key:
             _save_api_key_to_env(env_var, api_key_input)
 
+    # --- Helper: materialise a Material to a temp file path ---
+    def _material_to_path(m) -> str:
+        with ml.open_material(m) as src:
+            fd, path = tempfile.mkstemp(suffix=os.path.splitext(m.filename)[1])
+            with os.fdopen(fd, "wb") as dst:
+                dst.write(src.read())
+        return path
+
     # --- Helper: resolve file paths from uploads or synthetic data ---
     def _resolve_paths() -> dict:
         """Return a dict of file_key -> path (or rubric_id), from synthetic data or uploads."""
         if use_synthetic:
             return _get_synthetic_files(selected_type_id) or {}
         paths = {}
+        # rubric from library picker or upload
+        if rubric_choice is not None:
+            paths["rubric"] = _material_to_path(rubric_choice)
+        elif uploaded_files.get("rubric"):
+            paths["rubric"] = _save_upload(uploaded_files["rubric"])
+        # answer_key from library picker or upload
+        if ak_choice is not None:
+            paths["answer_key"] = _material_to_path(ak_choice)
+        elif uploaded_files.get("answer_key"):
+            paths["answer_key"] = _save_upload(uploaded_files["answer_key"])
+        # remaining files (responses, scores, etc.)
         for file_spec in required_files:
-            uf = uploaded_files.get(file_spec["key"])
+            key = file_spec["key"]
+            if key in ("rubric", "answer_key"):
+                continue
+            uf = uploaded_files.get(key)
             if uf:
-                paths[file_spec["key"]] = _save_upload(uf)
+                paths[key] = _save_upload(uf)
+        # save student notes to library if user opted in
+        if keep_in_library:
+            notes_uf = uploaded_files.get("responses")
+            if notes_uf:
+                _user = identity.get_current_user()
+                notes_uf.seek(0)
+                ml.save_material(
+                    "student_notes",
+                    file=notes_uf,
+                    filename=notes_uf.name,
+                    display_name=f"(inline) {notes_uf.name}",
+                    assessment_type=selected_type_id,
+                    uploaded_by=_user.email,
+                )
+                notes_uf.seek(0)
         return paths
 
     # --- Dry Run ---
