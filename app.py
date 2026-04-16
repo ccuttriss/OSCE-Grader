@@ -885,6 +885,10 @@ def tab_grade_notes():
 
         else:
             # ---- KPSOM grading path ----
+            import hashlib
+            import grading_runs as gr
+            import audit as _audit
+
             saved_paths = _resolve_paths()
 
             sections = assessment_type.get_sections()
@@ -914,6 +918,36 @@ def tab_grade_notes():
                 auth_session_id=user.session_id,
             )
 
+            # Hash student notes file
+            _notes_path = saved_paths.get("responses", "")
+            if _notes_path and os.path.isfile(_notes_path):
+                with open(_notes_path, "rb") as _f:
+                    _notes_sha = hashlib.sha256(_f.read()).hexdigest()
+            else:
+                _notes_sha = ""
+
+            _run_row_id = gr.begin_run(
+                run_uuid=ctx.run_id,
+                user_email=user.email,
+                auth_session_id=user.session_id,
+                assessment_type_id=selected_type_id,
+                provider=ctx.provider,
+                model=ctx.model,
+                temperature=ctx.temperature,
+                top_p=ctx.top_p,
+                workers=ctx.workers,
+                max_tokens=ctx.max_tokens,
+                sections=ctx.sections,
+                rubric_material_id=(rubric_choice.id if rubric_choice is not None else None),
+                answer_key_material_id=(ak_choice.id if ak_choice is not None else None),
+                student_notes_sha256=_notes_sha,
+            )
+            _audit.log_event(
+                "grading.run.start", stream="user", actor=user,
+                target_kind="run", target_id=ctx.run_id,
+                detail={"provider": ctx.provider, "model": ctx.model},
+            )
+
             try:
                 result_df = process_assessment(
                     assessment_type,
@@ -926,10 +960,39 @@ def tab_grade_notes():
                     progress_callback=_kpsom_progress,
                     ctx=ctx,
                 )
+
+                with open(output_file, "rb") as _f:
+                    _results_bytes = _f.read()
+                _results_sha = gr.store_results_file(_results_bytes)
+                gr.complete_run(_run_row_id, results_sha256=_results_sha, summary={"rows": len(result_df)})
+                _audit.log_event(
+                    "grading.run.complete", stream="user", actor=user,
+                    target_kind="run", target_id=ctx.run_id,
+                    detail={"rows": len(result_df), "results_sha": _results_sha},
+                )
+                st.session_state["results_run_uuid"] = ctx.run_id
+                st.session_state["results_sha"] = _results_sha
+
             except (SystemExit, ValueError) as e:
+                gr.cancel_run(_run_row_id, reason=str(e)[:200])
+                _audit.log_event(
+                    "grading.run.cancel", stream="user", actor=user,
+                    severity="error", outcome="failure",
+                    target_kind="run", target_id=ctx.run_id,
+                    error_code=type(e).__name__,
+                    detail={"error": str(e)[:200]},
+                )
                 st.error(f"Grading failed: {e}")
                 return
             except Exception as e:
+                gr.cancel_run(_run_row_id, reason=str(e)[:200])
+                _audit.log_event(
+                    "grading.run.cancel", stream="user", actor=user,
+                    severity="error", outcome="failure",
+                    target_kind="run", target_id=ctx.run_id,
+                    error_code=type(e).__name__,
+                    detail={"error": str(e)[:200]},
+                )
                 st.error(f"Unexpected error during grading: {e}")
                 return
 
@@ -1013,6 +1076,19 @@ def _display_grading_results():
         dcol1, dcol2 = st.columns(2)
         with dcol1:
             with open(output_file, "rb") as f:
+                # Emit results.download audit event when the download button is shown.
+                # In Streamlit, the event fires on tab render (each rerun while results
+                # are displayed), which is the earliest point we can reliably log it.
+                import audit as _audit
+                _dl_user = identity.get_current_user()
+                _dl_run_uuid = st.session_state.get("results_run_uuid")
+                _dl_results_sha = st.session_state.get("results_sha")
+                if _dl_run_uuid:
+                    _audit.log_event(
+                        "results.download", stream="user", actor=_dl_user,
+                        target_kind="run", target_id=_dl_run_uuid,
+                        target_hash=_dl_results_sha,
+                    )
                 st.download_button(
                     "Download Results (.xlsx)",
                     data=f.read(),
