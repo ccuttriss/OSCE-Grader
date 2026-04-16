@@ -2517,8 +2517,34 @@ def tab_synthetic_generator():
 # =========================================================================
 # Main app layout
 # =========================================================================
-st.title("OSCE Grader")
-st.caption("AI-powered grading for medical student post-encounter notes")
+import identity
+
+user = identity.get_current_user()
+if user is None:
+    st.title("OSCE Grader")
+    st.caption("AI-powered grading for medical student post-encounter notes")
+    with st.form("sign_in", clear_on_submit=False):
+        email = st.text_input("Institutional email", placeholder="you@institution.edu")
+        submitted = st.form_submit_button("Continue")
+    if submitted:
+        try:
+            identity.sign_in(email)
+            st.rerun()
+        except ValueError:
+            st.error("Please enter a valid email address.")
+    st.caption("Your email is recorded in the audit log for this session only.")
+    st.stop()
+
+# Header shown after sign-in
+hdr_left, hdr_right = st.columns([3, 1])
+with hdr_left:
+    st.title("OSCE Grader")
+    st.caption("AI-powered grading for medical student post-encounter notes")
+with hdr_right:
+    st.markdown(f"**{user.email}**  \n_role: {user.role}_")
+    if st.button("Sign out"):
+        identity.sign_out()
+        st.rerun()
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Grade Notes",
