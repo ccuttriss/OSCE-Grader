@@ -807,7 +807,7 @@ def tab_grade_notes():
         log_file = os.path.join(output_dir, "results_streamlit.log")
 
         try:
-            caller = create_caller(provider)
+            caller = create_caller(provider, model=selected_model)
         except SystemExit:
             st.error(f"Failed to create {PROVIDER_LABELS[provider]} caller. Check your API key.")
             return
