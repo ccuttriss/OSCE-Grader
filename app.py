@@ -2529,20 +2529,35 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Synthetic Data",
 ])
 
-with tab1:
-    tab_grade_notes()
+import hashlib
+import traceback
+try:
+    with tab1:
+        tab_grade_notes()
 
-with tab2:
-    tab_analysis()
+    with tab2:
+        tab_analysis()
 
-with tab3:
-    tab_flagged()
+    with tab3:
+        tab_flagged()
 
-with tab4:
-    tab_convert()
+    with tab4:
+        tab_convert()
 
-with tab5:
-    tab_gold_standard()
+    with tab5:
+        tab_gold_standard()
 
-with tab6:
-    tab_synthetic_generator()
+    with tab6:
+        tab_synthetic_generator()
+except Exception as exc:
+    stack = traceback.format_exc()
+    stack_hash = hashlib.sha256(stack.encode()).hexdigest()[:16]
+    log_event(
+        "app.error",
+        stream="system",
+        severity="error",
+        outcome="failure",
+        error_code=type(exc).__name__,
+        detail={"stack_hash": stack_hash, "message": str(exc)[:200]},
+    )
+    raise
