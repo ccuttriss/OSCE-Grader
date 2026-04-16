@@ -866,11 +866,13 @@ def main() -> None:
 
     # --- Resolve model for the selected provider ---
     if args.model:
-        config.MODEL = args.model
+        model = args.model
     elif args.provider != config.PROVIDER:
         # User switched providers via CLI but didn't specify --model.
         # Use the provider's default model instead of the config.py default.
-        config.MODEL = config.DEFAULT_MODELS.get(args.provider, config.MODEL)
+        model = config.DEFAULT_MODELS.get(args.provider, config.MODEL)
+    else:
+        model = config.MODEL
 
     # --- Validate parameter ranges ---
     max_temp = 1.0 if args.provider == "anthropic" else 2.0
@@ -907,11 +909,28 @@ def main() -> None:
 
     # --- Initialise the LLM caller ---
     caller = create_caller(args.provider)
-    logger.info("Provider: %s | Model: %s", args.provider, config.MODEL)
+    logger.info("Provider: %s | Model: %s", args.provider, model)
 
     rubric_content, answer_key_content = read_rubric_and_key(
         args.rubric, args.answer_key
     )
+
+    import uuid
+    ctx = RunContext(
+        run_id=str(uuid.uuid4()),
+        actor_email="cli_local",
+        actor_role="admin",
+        auth_session_id=str(uuid.uuid4()),
+        provider=args.provider,
+        model=model,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        workers=args.workers,
+        max_tokens=config.MAX_TOKENS,
+        assessment_type=args.assessment_type if hasattr(args, "assessment_type") else "uk_osce",
+        sections=list(config.SECTIONS),
+    )
+
     process_excel_file_with_key(
         caller,
         args.notes,
