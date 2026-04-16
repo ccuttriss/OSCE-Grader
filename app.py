@@ -41,6 +41,7 @@ from providers import create_caller
 from convert_rubric import convert_docx_to_text, convert_pdf_to_text
 from assessment_types import REGISTRY, get_type
 from grader import process_assessment
+from run_context import run_context_from_streamlit
 from gold_standard import (
     load_faculty_session,
     validate_sessions,
@@ -595,14 +596,6 @@ def tab_grade_notes():
         if api_key_input and not has_env_key:
             _save_api_key_to_env(env_var, api_key_input)
 
-    # --- Set config for the selected model ---
-    def _set_config():
-        config.MODEL = selected_model
-        config.PROVIDER = provider
-        config.TEMPERATURE = temperature
-        if detected_sections:
-            config.SECTIONS = detected_sections
-
     # --- Helper: resolve file paths from uploads or synthetic data ---
     def _resolve_paths() -> dict:
         """Return a dict of file_key -> path (or rubric_id), from synthetic data or uploads."""
@@ -621,7 +614,6 @@ def tab_grade_notes():
             return
 
         _set_api_key()
-        _set_config()
 
         if is_uk:
             paths = _resolve_paths()
@@ -670,7 +662,6 @@ def tab_grade_notes():
             return
 
         _set_api_key()
-        _set_config()
 
         # Output paths
         output_dir = os.path.join(REPO_ROOT, "uploads_tmp")
@@ -703,7 +694,7 @@ def tab_grade_notes():
                 st.error(f"Failed to read student notes: {e}")
                 return
 
-            sections = config.SECTIONS
+            sections = detected_sections if detected_sections else config.SECTIONS
             missing = validate_input_columns(df, sections)
             if missing:
                 st.error(f"Missing columns in student notes: {', '.join(missing)}")
@@ -797,6 +788,17 @@ def tab_grade_notes():
                     status.update(label=f"Grading student {current + 1} of {total}...")
                     status.write(f"Processing student {current + 1}...")
 
+            ctx = run_context_from_streamlit(
+                provider=provider,
+                model=selected_model,
+                temperature=temperature,
+                top_p=config.TOP_P,
+                workers=workers,
+                max_tokens=config.MAX_TOKENS,
+                assessment_type=selected_type_id,
+                sections=sections,
+            )
+
             try:
                 result_df = process_assessment(
                     assessment_type,
@@ -807,6 +809,7 @@ def tab_grade_notes():
                     config.TOP_P,
                     max_workers=workers,
                     progress_callback=_kpsom_progress,
+                    ctx=ctx,
                 )
             except (SystemExit, ValueError) as e:
                 st.error(f"Grading failed: {e}")
@@ -1302,21 +1305,12 @@ def tab_convert():
 
         with st.spinner("Parsing rubric with AI..."):
             try:
-                old_model = config.MODEL
-                old_provider = config.PROVIDER
-                config.MODEL = convert_model
-                config.PROVIDER = convert_provider
-
-                caller = create_caller(convert_provider)
+                caller = create_caller(convert_provider, model=convert_model)
                 messages = [
                     {"role": "system", "content": config.CONVERT_PROMPT},
                     {"role": "user", "content": raw_text},
                 ]
                 response = call_llm(caller, messages, temperature=0.0, top_p=1.0)
-
-                # Restore config
-                config.MODEL = old_model
-                config.PROVIDER = old_provider
 
                 # Parse JSON response
                 import json
