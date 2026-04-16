@@ -2808,6 +2808,76 @@ def tab_source_materials():
 
 
 # =========================================================================
+# Tab 8 — Audit Log
+# =========================================================================
+
+
+def tab_audit_log():
+    user = identity.get_current_user()
+    if not identity.is_admin(user):
+        import audit
+        audit.log_event(
+            "tab.access.denied", stream="user", actor=user,
+            severity="warn", outcome="denied",
+            target_kind="tab", target_id="audit_log",
+        )
+        st.error("This tab requires admin privileges.")
+        return
+
+    import audit
+    from datetime import datetime, timedelta
+
+    st.subheader("Audit Log")
+    cols = st.columns(4)
+    with cols[0]:
+        stream = st.selectbox("Stream", ["(all)", "user", "system"])
+    with cols[1]:
+        since = st.date_input("Since", value=(datetime.utcnow() - timedelta(days=7)).date())
+    with cols[2]:
+        until = st.date_input("Until", value=datetime.utcnow().date())
+    with cols[3]:
+        actor = st.text_input("Actor email (exact)")
+
+    action = st.text_input("Action (exact, optional)")
+    severity = st.selectbox("Severity", ["(all)", "info", "warn", "error"])
+
+    events = audit.query_events(
+        stream=None if stream == "(all)" else stream,
+        actor_email=actor or None,
+        action=action or None,
+        severity=None if severity == "(all)" else severity,
+        since=datetime.combine(since, datetime.min.time()),
+        until=datetime.combine(until, datetime.max.time()),
+        limit=2000,
+    )
+
+    import pandas as pd
+    df = pd.DataFrame([{
+        "ts": e.ts, "stream": e.stream, "severity": e.severity,
+        "action": e.action, "actor_email": e.actor_email,
+        "outcome": e.outcome,
+        "target": f"{e.target_kind}:{e.target_id}" if e.target_kind else "",
+        "error_code": e.error_code, "detail": e.detail_json,
+    } for e in events])
+    st.dataframe(df, use_container_width=True)
+
+    if st.button("Export to CSV"):
+        import io
+        buf = io.StringIO()
+        df.to_csv(buf, index=False)
+        st.download_button(
+            "Download audit_log.csv",
+            data=buf.getvalue(),
+            file_name=f"audit_log_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+        )
+        audit.log_event(
+            "audit.export", stream="user", actor=user,
+            detail={"rows": len(df)},
+        )
+
+
+# =========================================================================
 # Main app layout
 # =========================================================================
 import identity
@@ -2847,8 +2917,7 @@ ALL_TABS = [
     ("Convert Rubric",     tab_convert,              "admin"),
     ("Gold Standard",      tab_gold_standard,        "admin"),
     ("Synthetic Data",     tab_synthetic_generator,  "admin"),
-    # Audit Log handler arrives in Phase 6
-    ("Audit Log",          lambda: st.info("Audit Log — coming in Phase 6"),        "admin"),
+    ("Audit Log",          tab_audit_log,                                            "admin"),
 ]
 
 visible = [t for t in ALL_TABS if t[2] == "end_user" or identity.is_admin(user)]
