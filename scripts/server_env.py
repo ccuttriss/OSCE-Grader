@@ -41,3 +41,31 @@ def results_retention_days() -> int:
 def admin_emails() -> set[str]:
     raw = os.environ.get("OSCE_ADMIN_EMAILS", "")
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+import logging
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        import json
+        payload = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%SZ"),
+            "level": record.levelname,
+            "name": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload)
+
+
+def configure_logging() -> None:
+    handler = logging.StreamHandler()
+    if log_json():
+        handler.setFormatter(JsonFormatter())
+    else:
+        handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(logging.INFO)

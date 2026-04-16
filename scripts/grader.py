@@ -834,6 +834,8 @@ def process_excel_file_with_key(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    import server_env
+    server_env.configure_logging()
     from audit import log_event
     log_event("app.start", stream="system", severity="info", detail={"surface": "cli"})
     import server_env
@@ -909,12 +911,6 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
-
-    # --- Configure console logging ---
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(levelname)s: %(message)s",
-    )
 
     # --- Resolve model for the selected provider ---
     if args.model:

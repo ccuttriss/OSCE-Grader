@@ -76,7 +76,8 @@ from synthetic_generator import (
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+import server_env
+server_env.configure_logging()
 logger = logging.getLogger("osce_grader.streamlit")
 
 # ---------------------------------------------------------------------------
