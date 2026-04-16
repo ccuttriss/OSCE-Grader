@@ -960,12 +960,14 @@ def main() -> None:
         args.rubric, args.answer_key
     )
 
+    from identity import cli_stub_user
+    stub = cli_stub_user()
     import uuid
     ctx = RunContext(
         run_id=str(uuid.uuid4()),
-        actor_email="cli_local",
-        actor_role="admin",
-        auth_session_id=str(uuid.uuid4()),
+        actor_email=stub.email,
+        actor_role=stub.role,
+        auth_session_id=stub.session_id,
         provider=args.provider,
         model=model,
         temperature=args.temperature,
