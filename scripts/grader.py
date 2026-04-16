@@ -22,6 +22,7 @@ import pandas as pd
 
 import config
 from providers import LLMCaller, SUPPORTED_PROVIDERS, create_caller
+from run_context import RunContext  # noqa: F401  — re-exported for typing
 
 
 class GraderError(Exception):
@@ -372,6 +373,8 @@ def process_assessment(
     top_p: float,
     max_workers: int = 4,
     progress_callback=None,
+    *,
+    ctx: "RunContext | None" = None,
 ) -> pd.DataFrame:
     """Grade student responses using any AssessmentType implementation.
 
@@ -387,10 +390,16 @@ def process_assessment(
         top_p: LLM top-p parameter.
         max_workers: Number of sections to grade in parallel per student.
         progress_callback: Optional callable(current, total) for progress.
+        ctx: Optional RunContext whose settings override temperature/top_p/workers.
 
     Returns:
         The results DataFrame.
     """
+    if ctx is not None:
+        temperature = ctx.temperature
+        top_p = ctx.top_p
+        max_workers = ctx.workers
+
     from assessment_types.base import GradingResult
 
     log_file = os.path.splitext(output_file)[0] + ".log"
