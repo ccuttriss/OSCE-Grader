@@ -88,6 +88,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+from audit import log_event
+log_event("app.start", stream="system", severity="info", detail={"surface": "streamlit"})
 
 # ---------------------------------------------------------------------------
 # Model benchmark data
