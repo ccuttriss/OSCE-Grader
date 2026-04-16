@@ -58,6 +58,7 @@ def save_material(
     tags: list[str] | None = None,
     uploaded_by: str,
     notes: str | None = None,
+    uploaded_by_user=None,  # identity.User | None — preferred, but optional for backcompat
 ) -> Material:
     data = file.read()
     sha = hashlib.sha256(data).hexdigest()
@@ -106,7 +107,7 @@ def save_material(
     log_event(
         "material.upload",
         stream="user",
-        actor=None,
+        actor=uploaded_by_user,
         detail={
             "kind": kind, "size_bytes": size,
             "assessment_type": assessment_type, "uploaded_by": uploaded_by,

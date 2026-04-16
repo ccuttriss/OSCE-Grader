@@ -518,7 +518,7 @@ def tab_grade_notes():
                     ml.save_material(
                         "rubric", file=nr, filename=nr.name,
                         display_name=f"(inline) {nr.name}", assessment_type=selected_type_id,
-                        uploaded_by=_user.email,
+                        uploaded_by=_user.email, uploaded_by_user=_user,
                     )
                     st.rerun()
             with col2:
@@ -528,7 +528,7 @@ def tab_grade_notes():
                     ml.save_material(
                         "answer_key", file=na, filename=na.name,
                         display_name=f"(inline) {na.name}", assessment_type=selected_type_id,
-                        uploaded_by=_user.email,
+                        uploaded_by=_user.email, uploaded_by_user=_user,
                     )
                     st.rerun()
 
@@ -740,7 +740,7 @@ def tab_grade_notes():
                     filename=notes_uf.name,
                     display_name=f"(inline) {notes_uf.name}",
                     assessment_type=selected_type_id,
-                    uploaded_by=_user.email,
+                    uploaded_by=_user.email, uploaded_by_user=_user,
                 )
                 notes_uf.seek(0)
         return paths
@@ -2828,6 +2828,7 @@ def tab_source_materials():
                     display_name=name, assessment_type=atype,
                     tags=[t.strip() for t in tags_raw.split(",") if t.strip()],
                     uploaded_by=user.email, notes=notes or None,
+                    uploaded_by_user=user,
                 )
                 st.success(f"Uploaded {f.name}")
                 st.rerun()
