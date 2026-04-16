@@ -2561,6 +2561,68 @@ def tab_synthetic_generator():
 
 
 # =========================================================================
+# Tab 7 — Source Materials
+# =========================================================================
+
+
+def tab_source_materials():
+    import material_library as ml
+    user = identity.get_current_user()
+    st.subheader("Source Materials")
+
+    cols = st.columns([2, 1, 1, 1])
+    with cols[0]:
+        search = st.text_input("Search by name", key="sm_search")
+    with cols[1]:
+        kind_filter = st.selectbox(
+            "Kind", ["(all)", "rubric", "answer_key", "exemplar", "student_notes"],
+            key="sm_kind",
+        )
+    with cols[2]:
+        from assessment_types import REGISTRY
+        atypes = ["(all)"] + list(REGISTRY.keys())
+        atype_filter = st.selectbox("Assessment type", atypes, key="sm_atype")
+    with cols[3]:
+        show_archived = st.checkbox("Include archived", value=False, key="sm_arch")
+
+    items = ml.list_materials(
+        kind=None if kind_filter == "(all)" else kind_filter,
+        assessment_type=None if atype_filter == "(all)" else atype_filter,
+        include_archived=show_archived,
+    )
+    if search:
+        items = [m for m in items if search.lower() in m.display_name.lower()]
+
+    import pandas as pd
+    df = pd.DataFrame([
+        {"id": m.id, "name": m.display_name, "kind": m.kind,
+         "assessment": m.assessment_type, "uploader": m.uploaded_by,
+         "uploaded_at": m.uploaded_at, "archived": bool(m.archived_at)}
+        for m in items
+    ])
+    st.dataframe(df, use_container_width=True)
+
+    with st.expander("Upload new material"):
+        with st.form("upload_material"):
+            kind = st.selectbox("Kind", ["rubric", "answer_key", "exemplar", "student_notes"])
+            name = st.text_input("Display name")
+            atype = st.selectbox("Assessment type", list(REGISTRY.keys()))
+            tags_raw = st.text_input("Tags (comma-separated, optional)")
+            notes = st.text_area("Notes (optional)")
+            f = st.file_uploader("File", type=["xlsx", "csv", "pdf", "docx"])
+            if st.form_submit_button("Upload") and f is not None and name:
+                ml.save_material(
+                    kind,  # type: ignore[arg-type]
+                    file=f, filename=f.name,
+                    display_name=name, assessment_type=atype,
+                    tags=[t.strip() for t in tags_raw.split(",") if t.strip()],
+                    uploaded_by=user.email, notes=notes or None,
+                )
+                st.success(f"Uploaded {f.name}")
+                st.rerun()
+
+
+# =========================================================================
 # Main app layout
 # =========================================================================
 import identity
@@ -2596,8 +2658,7 @@ ALL_TABS = [
     ("Grade Notes",        tab_grade_notes,          "end_user"),
     ("Analysis Dashboard", tab_analysis,             "end_user"),
     ("Flagged Items",      tab_flagged,              "end_user"),
-    # Source Materials handler arrives in Phase 4 — stubbed below
-    ("Source Materials",   lambda: st.info("Source Materials — coming in Phase 4"), "end_user"),
+    ("Source Materials",   tab_source_materials,     "end_user"),
     ("Convert Rubric",     tab_convert,              "admin"),
     ("Gold Standard",      tab_gold_standard,        "admin"),
     ("Synthetic Data",     tab_synthetic_generator,  "admin"),
