@@ -120,12 +120,30 @@ def call_llm(
     Retries up to ``config.MAX_RETRIES`` times with exponential back-off on
     transient failures (rate-limits, network errors, server errors).
     """
+    from audit import log_event as _audit_log
     delay = config.RETRY_DELAY
     last_exception: Optional[Exception] = None
+    _provider = getattr(caller, "provider", "unknown")
+    _model = getattr(caller, "model", "unknown")
 
     for attempt in range(1, config.MAX_RETRIES + 1):
+        t0 = time.time()
         try:
-            return caller(messages, temperature, top_p)
+            response = caller(messages, temperature, top_p)
+            latency_ms = int((time.time() - t0) * 1000)
+            _audit_log(
+                "llm.call",
+                stream="system",
+                severity="info",
+                outcome="success",
+                detail={
+                    "provider": _provider,
+                    "model": _model,
+                    "latency_ms": latency_ms,
+                    "attempt": attempt,
+                },
+            )
+            return response
         except Exception as exc:
             last_exception = exc
             if attempt < config.MAX_RETRIES:
@@ -136,6 +154,19 @@ def call_llm(
                     exc,
                 )
                 logger.info("Retrying in %ds...", delay)
+                _audit_log(
+                    "llm.retry",
+                    stream="system",
+                    severity="warn",
+                    outcome="failure",
+                    error_code=type(exc).__name__,
+                    detail={
+                        "provider": _provider,
+                        "model": _model,
+                        "attempt": attempt,
+                        "retry_delay_s": delay,
+                    },
+                )
                 time.sleep(delay)
                 delay *= 2  # exponential back-off
             else:
@@ -143,6 +174,18 @@ def call_llm(
                     "API call failed after %d attempts: %s",
                     config.MAX_RETRIES,
                     exc,
+                )
+                _audit_log(
+                    "llm.failure",
+                    stream="system",
+                    severity="error",
+                    outcome="failure",
+                    error_code=type(exc).__name__,
+                    detail={
+                        "provider": _provider,
+                        "model": _model,
+                        "attempt": attempt,
+                    },
                 )
                 raise last_exception  # type: ignore[misc]
 
