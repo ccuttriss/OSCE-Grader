@@ -162,3 +162,21 @@ def retention_sweep(
         detail={"deleted": deleted, "user_days": user_days, "system_days": system_days},
     )
     return deleted
+
+
+import threading
+
+
+def schedule_daily_sweep(user_days: int, system_days: int) -> None:
+    """Start a daemon thread that sweeps once per 24h."""
+    def loop():
+        import time
+        while True:
+            try:
+                retention_sweep(user_days=user_days, system_days=system_days)
+            except Exception as exc:
+                print(f"audit.sweep_failure: {exc}", file=sys.stderr)
+            time.sleep(24 * 60 * 60)
+
+    t = threading.Thread(target=loop, daemon=True, name="audit-retention-sweep")
+    t.start()

@@ -90,6 +90,17 @@ st.set_page_config(
 )
 from audit import log_event
 log_event("app.start", stream="system", severity="info", detail={"surface": "streamlit"})
+import server_env
+if server_env.server_mode():
+    from audit import schedule_daily_sweep, retention_sweep
+    retention_sweep(
+        user_days=server_env.audit_retention_user_days(),
+        system_days=server_env.audit_retention_system_days(),
+    )
+    schedule_daily_sweep(
+        user_days=server_env.audit_retention_user_days(),
+        system_days=server_env.audit_retention_system_days(),
+    )
 
 # ---------------------------------------------------------------------------
 # Model benchmark data

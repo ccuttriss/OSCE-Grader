@@ -836,6 +836,13 @@ def process_excel_file_with_key(
 def main() -> None:
     from audit import log_event
     log_event("app.start", stream="system", severity="info", detail={"surface": "cli"})
+    import server_env
+    if server_env.server_mode():
+        from audit import retention_sweep
+        retention_sweep(
+            user_days=server_env.audit_retention_user_days(),
+            system_days=server_env.audit_retention_system_days(),
+        )
     parser = argparse.ArgumentParser(
         description="Grade OSCE post-encounter notes from an Excel file "
         "using an LLM with a rubric and answer key.",
