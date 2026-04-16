@@ -13,8 +13,17 @@ import logging
 import os
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+# ---------------------------------------------------------------------------
+# Module-level sentinel: ensure the daily retention sweep thread is started
+# at most once per process regardless of how many times Streamlit reruns this
+# module.  Python only imports a module once, so these objects persist.
+# ---------------------------------------------------------------------------
+_sweep_lock = threading.Lock()
+_sweep_scheduled = False
 
 import pandas as pd
 import streamlit as st
@@ -90,18 +99,20 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 from audit import log_event
-log_event("app.start", stream="system", severity="info", detail={"surface": "streamlit"})
 import server_env
 if server_env.server_mode():
     from audit import schedule_daily_sweep, retention_sweep
-    retention_sweep(
-        user_days=server_env.audit_retention_user_days(),
-        system_days=server_env.audit_retention_system_days(),
-    )
-    schedule_daily_sweep(
-        user_days=server_env.audit_retention_user_days(),
-        system_days=server_env.audit_retention_system_days(),
-    )
+    with _sweep_lock:
+        if not _sweep_scheduled:
+            retention_sweep(
+                user_days=server_env.audit_retention_user_days(),
+                system_days=server_env.audit_retention_system_days(),
+            )
+            schedule_daily_sweep(
+                user_days=server_env.audit_retention_user_days(),
+                system_days=server_env.audit_retention_system_days(),
+            )
+            globals()["_sweep_scheduled"] = True
 
 # ---------------------------------------------------------------------------
 # Model benchmark data
