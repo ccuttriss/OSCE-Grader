@@ -21,7 +21,7 @@ DB_PATH = os.path.join(
     "osce_grader.db",
 )
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Connection management
@@ -126,6 +126,28 @@ CREATE TABLE IF NOT EXISTS grading_runs (
     results_json       TEXT,
     log_text           TEXT
 );
+
+CREATE TABLE IF NOT EXISTS audit_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT    NOT NULL DEFAULT (datetime('now')),
+    stream          TEXT    NOT NULL CHECK (stream IN ('user','system')),
+    severity        TEXT    NOT NULL CHECK (severity IN ('info','warn','error')),
+    action          TEXT    NOT NULL,
+    actor_email     TEXT,
+    actor_role      TEXT,
+    session_id      TEXT,
+    request_id      TEXT,
+    target_kind     TEXT,
+    target_id       TEXT,
+    target_hash     TEXT,
+    outcome         TEXT    NOT NULL CHECK (outcome IN ('success','failure','denied')),
+    error_code      TEXT,
+    detail_json     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts            ON audit_events(ts);
+CREATE INDEX IF NOT EXISTS idx_audit_actor         ON audit_events(actor_email, ts);
+CREATE INDEX IF NOT EXISTS idx_audit_stream_action ON audit_events(stream, action, ts);
+CREATE INDEX IF NOT EXISTS idx_audit_target        ON audit_events(target_kind, target_id);
 """
 
 
