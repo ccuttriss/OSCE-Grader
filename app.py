@@ -2546,35 +2546,28 @@ with hdr_right:
         identity.sign_out()
         st.rerun()
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "Grade Notes",
-    "Analysis Dashboard",
-    "Flagged Items",
-    "Convert Rubric",
-    "Gold Standard",
-    "Synthetic Data",
-])
+ALL_TABS = [
+    ("Grade Notes",        tab_grade_notes,          "end_user"),
+    ("Analysis Dashboard", tab_analysis,             "end_user"),
+    ("Flagged Items",      tab_flagged,              "end_user"),
+    # Source Materials handler arrives in Phase 4 — stubbed below
+    ("Source Materials",   lambda: st.info("Source Materials — coming in Phase 4"), "end_user"),
+    ("Convert Rubric",     tab_convert,              "admin"),
+    ("Gold Standard",      tab_gold_standard,        "admin"),
+    ("Synthetic Data",     tab_synthetic_generator,  "admin"),
+    # Audit Log handler arrives in Phase 6
+    ("Audit Log",          lambda: st.info("Audit Log — coming in Phase 6"),        "admin"),
+]
+
+visible = [t for t in ALL_TABS if t[2] == "end_user" or identity.is_admin(user)]
+tab_objects = st.tabs([t[0] for t in visible])
 
 import hashlib
 import traceback
 try:
-    with tab1:
-        tab_grade_notes()
-
-    with tab2:
-        tab_analysis()
-
-    with tab3:
-        tab_flagged()
-
-    with tab4:
-        tab_convert()
-
-    with tab5:
-        tab_gold_standard()
-
-    with tab6:
-        tab_synthetic_generator()
+    for tab_obj, (_name, handler, _role) in zip(tab_objects, visible):
+        with tab_obj:
+            handler()
 except Exception as exc:
     stack = traceback.format_exc()
     stack_hash = hashlib.sha256(stack.encode()).hexdigest()[:16]
