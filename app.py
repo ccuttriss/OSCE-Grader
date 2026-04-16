@@ -2896,6 +2896,9 @@ if user is None:
         except ValueError:
             st.error("Please enter a valid email address.")
     st.caption("Your email is recorded in the audit log for this session only.")
+    import server_env
+    if server_env.server_mode():
+        st.info("This system is monitored. All activity is logged.")
     st.stop()
 
 # Header shown after sign-in
