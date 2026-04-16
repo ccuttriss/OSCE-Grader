@@ -21,7 +21,7 @@ DB_PATH = os.path.join(
     "osce_grader.db",
 )
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # Connection management
@@ -148,6 +148,32 @@ CREATE INDEX IF NOT EXISTS idx_audit_ts            ON audit_events(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_actor         ON audit_events(actor_email, ts);
 CREATE INDEX IF NOT EXISTS idx_audit_stream_action ON audit_events(stream, action, ts);
 CREATE INDEX IF NOT EXISTS idx_audit_target        ON audit_events(target_kind, target_id);
+
+CREATE TABLE IF NOT EXISTS materials (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind            TEXT    NOT NULL CHECK (kind IN (
+                        'rubric','answer_key','student_notes','exemplar')),
+    display_name    TEXT    NOT NULL,
+    filename        TEXT    NOT NULL,
+    content_sha256  TEXT    NOT NULL,
+    size_bytes      INTEGER NOT NULL,
+    mime_type       TEXT,
+    assessment_type TEXT,
+    uploaded_by     TEXT    NOT NULL,
+    uploaded_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+    archived_at     TEXT,
+    notes           TEXT,
+    UNIQUE (content_sha256, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_materials_kind     ON materials(kind);
+CREATE INDEX IF NOT EXISTS idx_materials_assess   ON materials(assessment_type);
+CREATE INDEX IF NOT EXISTS idx_materials_archived ON materials(archived_at);
+
+CREATE TABLE IF NOT EXISTS material_tags (
+    material_id INTEGER NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+    tag         TEXT    NOT NULL,
+    PRIMARY KEY (material_id, tag)
+);
 """
 
 
