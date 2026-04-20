@@ -39,9 +39,18 @@ def test_end_to_end_audit_sequence(server_env, fake_streamlit):
     import identity
     import material_library as ml
     import audit
+    import passwords as pw
+    import database as db
 
-    # Sign in as admin
-    user = identity.sign_in("admin@x.edu")
+    # Provision the admin account with a real password and sign in.
+    good_pw = "Str0ngPass!word"
+    db.create_user(
+        "admin@x.edu",
+        role="admin",
+        password_hash=pw.hash_password(good_pw),
+        must_change_password=False,
+    )
+    user = identity.sign_in("admin@x.edu", good_pw)
     assert identity.is_admin(user)
 
     # Upload a rubric

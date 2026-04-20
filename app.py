@@ -2924,6 +2924,166 @@ def tab_source_materials():
 
 
 # =========================================================================
+# Tab — Users (admin)
+# =========================================================================
+
+
+def tab_users():
+    user = identity.get_current_user()
+    if not identity.is_admin(user):
+        import audit
+        audit.log_event(
+            "tab.access.denied", stream="user", actor=user,
+            severity="warn", outcome="denied",
+            target_kind="tab", target_id="users",
+        )
+        st.error("This tab requires admin privileges.")
+        return
+
+    import passwords as _pw
+    st.header("Users")
+    st.caption(
+        "Password hashes are one-way and never displayed. Resetting a "
+        "password replaces the hash and forces the user to set a new one "
+        "on their next sign-in."
+    )
+
+    # --- Add user ---
+    with st.expander("Add a new user", expanded=False):
+        with st.form("add_user", clear_on_submit=True):
+            new_email = st.text_input("Email", key="add_user_email")
+            new_role = st.selectbox(
+                "Role", ["end_user", "admin"], key="add_user_role"
+            )
+            new_pw = st.text_input(
+                "Initial password (optional)",
+                type="password",
+                key="add_user_pw",
+                help=(
+                    "Leave blank to force the user to pick their own "
+                    "password on first sign-in."
+                ),
+            )
+            add_clicked = st.form_submit_button("Add user", type="primary")
+        if add_clicked:
+            email_norm = (new_email or "").strip().lower()
+            if not identity._EMAIL_RE.match(email_norm):
+                st.error("Please enter a valid email address.")
+            elif db.get_user(email_norm):
+                st.error("A user with that email already exists.")
+            else:
+                pw_hash = ""
+                if new_pw:
+                    issues = _pw.policy_violations(new_pw)
+                    if issues:
+                        st.error(
+                            "Password " + "; ".join(issues) + "."
+                        )
+                        st.stop()
+                    pw_hash = _pw.hash_password(new_pw)
+                db.create_user(
+                    email_norm,
+                    role=new_role,
+                    password_hash=pw_hash,
+                    must_change_password=True,
+                )
+                import audit
+                audit.log_event(
+                    "user.create", stream="user", actor=user,
+                    target_kind="user", target_id=email_norm,
+                    detail={"role": new_role, "has_initial_pw": bool(pw_hash)},
+                )
+                st.success(f"Added {email_norm}")
+                st.rerun()
+
+    st.divider()
+
+    # --- Existing users ---
+    users = db.list_users()
+    if not users:
+        st.info("No users exist yet.")
+        return
+
+    for row in users:
+        is_self = (user and user.email == row["email"])
+        cols = st.columns([3, 2, 2, 3, 1])
+        cols[0].markdown(f"**{row['email']}**")
+        cols[1].markdown(f"_{row['role']}_")
+        status = (
+            "\u26a0\ufe0f must set password"
+            if row["must_change_password"]
+            else "\u2705 password set"
+        )
+        cols[2].markdown(status)
+        cols[3].caption(f"added {row['created_at']}")
+
+        with cols[4].popover("\u2026", use_container_width=True):
+            st.markdown(f"**Manage {row['email']}**")
+            new_pw = st.text_input(
+                "Reset password to",
+                type="password",
+                key=f"reset_pw_{row['email']}",
+                help=(
+                    "Replaces the existing hash. User will be forced to "
+                    "pick a new password at next sign-in."
+                ),
+            )
+            if st.button(
+                "Reset password",
+                key=f"reset_btn_{row['email']}",
+                disabled=not new_pw,
+            ):
+                issues = _pw.policy_violations(new_pw)
+                if issues:
+                    st.error("Password " + "; ".join(issues) + ".")
+                else:
+                    db.set_user_password_hash(
+                        row["email"],
+                        _pw.hash_password(new_pw),
+                        must_change_password=True,
+                    )
+                    import audit
+                    audit.log_event(
+                        "user.password_reset", stream="user", actor=user,
+                        target_kind="user", target_id=row["email"],
+                    )
+                    st.success(f"Reset password for {row['email']}")
+                    st.rerun()
+
+            if row["role"] == "admin":
+                if st.button(
+                    "Demote to end_user",
+                    key=f"demote_{row['email']}",
+                    disabled=is_self,
+                    help="You can't demote yourself." if is_self else None,
+                ):
+                    db.set_user_role(row["email"], "end_user")
+                    st.rerun()
+            else:
+                if st.button(
+                    "Promote to admin",
+                    key=f"promote_{row['email']}",
+                ):
+                    db.set_user_role(row["email"], "admin")
+                    st.rerun()
+
+            if st.button(
+                "Delete user",
+                key=f"delete_{row['email']}",
+                disabled=is_self,
+                help="You can't delete yourself." if is_self else None,
+                type="secondary",
+            ):
+                db.delete_user(row["email"])
+                import audit
+                audit.log_event(
+                    "user.delete", stream="user", actor=user,
+                    target_kind="user", target_id=row["email"],
+                )
+                st.rerun()
+
+
+# =========================================================================
 # Tab — Models & Keys (admin)
 # =========================================================================
 
@@ -3419,19 +3579,7 @@ if user is None:
 
     import server_env
     in_server_mode = server_env.server_mode()
-    admin_emails_set = bool(server_env.admin_emails())
     secret_key_set = bool(os.environ.get("OSCE_SECRET_KEY", "").strip())
-
-    # Surface bootstrap problems before the operator types anything, otherwise
-    # they'd sign in as an end_user and wonder why no admin tabs show up.
-    if in_server_mode and not admin_emails_set:
-        st.error(
-            "\U0001f6a7 **Setup incomplete.** Server mode is on but "
-            "`OSCE_ADMIN_EMAILS` isn't configured, so no one can reach the "
-            "admin tabs. Add a comma-separated list of admin emails to the "
-            "environment (or `.env`) and restart:\n\n"
-            "```\nOSCE_ADMIN_EMAILS=you@yourschool.edu\n```"
-        )
     if in_server_mode and not secret_key_set:
         st.warning(
             "\u26a0\ufe0f `OSCE_SECRET_KEY` is not set. In server mode the "
@@ -3440,15 +3588,63 @@ if user is None:
             "until a key is provided."
         )
 
+    import passwords as _pw
+    pending_email = st.session_state.get("_osce_pending_change")
+
+    if pending_email:
+        # --- Forced password-change flow ---
+        st.subheader("Set a new password")
+        st.caption(
+            f"Signed-in as **{pending_email}**. Choose a new password to "
+            "finish signing in."
+        )
+        st.info(
+            "Password rules: at least "
+            f"{_pw.MIN_LENGTH} characters, including at least one uppercase "
+            "letter, one lowercase letter, one digit, and one symbol; "
+            "no spaces."
+        )
+        with st.form("force_change", clear_on_submit=False):
+            new1 = st.text_input("New password", type="password", key="fc_new")
+            new2 = st.text_input("Confirm new password", type="password", key="fc_confirm")
+            cancel_col, submit_col = st.columns([1, 1])
+            cancel = cancel_col.form_submit_button("Cancel")
+            submitted = submit_col.form_submit_button(
+                "Set password and continue", type="primary"
+            )
+        if cancel:
+            st.session_state.pop("_osce_pending_change", None)
+            st.rerun()
+        if submitted:
+            if new1 != new2:
+                st.error("The two password entries do not match.")
+            else:
+                issues = _pw.policy_violations(new1)
+                if issues:
+                    st.error("Password " + "; ".join(issues) + ".")
+                else:
+                    try:
+                        identity.complete_password_change(pending_email, new1)
+                        st.rerun()
+                    except identity.AuthError as exc:
+                        st.error(str(exc))
+        st.stop()
+
+    # --- Normal email + password sign-in ---
     with st.form("sign_in", clear_on_submit=False):
-        email = st.text_input("Institutional email", placeholder="you@institution.edu")
+        email = st.text_input(
+            "Institutional email", placeholder="you@institution.edu"
+        )
+        password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Continue")
     if submitted:
         try:
-            identity.sign_in(email)
+            identity.sign_in(email, password)
             st.rerun()
-        except ValueError:
-            st.error("Please enter a valid email address.")
+        except identity.PasswordChangeRequired:
+            st.rerun()
+        except identity.AuthError as exc:
+            st.error(str(exc))
     st.caption("Your email is recorded in the audit log for this session only.")
     if in_server_mode:
         st.info("This system is monitored. All activity is logged.")
@@ -3473,6 +3669,7 @@ ALL_TABS = [
     ("Convert Rubric",     tab_convert,              "admin"),
     ("Gold Standard",      tab_gold_standard,        "admin"),
     ("Synthetic Data",     tab_synthetic_generator,  "admin"),
+    ("Users",              tab_users,                "admin"),
     ("Models & Keys",      tab_models_keys,          "admin"),
     ("Model Evaluation",   tab_evaluation,           "admin"),
     ("Audit Log",          tab_audit_log,                                            "admin"),

@@ -22,7 +22,7 @@ def _default_db_path() -> str:
 
 DB_PATH = _default_db_path()
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 # ---------------------------------------------------------------------------
 # Connection management
@@ -200,7 +200,21 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
     error_text         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_benchmark_runs_started ON benchmark_runs(started_at);
+
+CREATE TABLE IF NOT EXISTS users (
+    email                TEXT PRIMARY KEY,
+    password_hash        TEXT NOT NULL DEFAULT '',
+    must_change_password INTEGER NOT NULL DEFAULT 1,
+    role                 TEXT NOT NULL DEFAULT 'end_user'
+                              CHECK (role IN ('admin', 'end_user')),
+    created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
+
+# Bootstrap admin seeded on first init. Password is blank and must be set
+# by the operator on initial sign-in.
+BOOTSTRAP_ADMIN_EMAIL = "kpsomit@kp.org"
 
 
 def _apply_migration_v4(conn: sqlite3.Connection) -> None:
@@ -239,6 +253,22 @@ def init_db() -> None:
         current = current_row[0]
         if current < 4:
             _apply_migration_v4(conn)
+
+        # Seed the bootstrap admin on first init (or any init where the
+        # users table is empty). Password is blank; the operator is forced
+        # to set one on first sign-in.
+        has_users = conn.execute(
+            "SELECT 1 FROM users LIMIT 1"
+        ).fetchone() is not None
+        if not has_users:
+            conn.execute(
+                "INSERT OR IGNORE INTO users "
+                "(email, password_hash, must_change_password, role) "
+                "VALUES (?, '', 1, 'admin')",
+                (BOOTSTRAP_ADMIN_EMAIL,),
+            )
+            logger.info("Seeded bootstrap admin user %s", BOOTSTRAP_ADMIN_EMAIL)
+
         if current < CURRENT_SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?)",
@@ -475,6 +505,80 @@ def get_benchmark_run(run_id: int) -> Optional[dict]:
             "SELECT * FROM benchmark_runs WHERE run_id = ?", (run_id,)
         ).fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Users (authentication)
+# ---------------------------------------------------------------------------
+
+def get_user(email: str) -> Optional[dict]:
+    """Return the user row for *email* as a dict, or None."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE email = ?", (email.lower(),)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_users() -> list[dict]:
+    """Return every user row, newest first."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT email, role, must_change_password, created_at, updated_at "
+            "FROM users ORDER BY created_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def create_user(
+    email: str,
+    role: str = "end_user",
+    *,
+    password_hash: str = "",
+    must_change_password: bool = True,
+) -> None:
+    """Insert a new user row. Raises if the email already exists."""
+    if role not in ("admin", "end_user"):
+        raise ValueError(f"invalid role: {role!r}")
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO users (email, password_hash, must_change_password, role) "
+            "VALUES (?, ?, ?, ?)",
+            (email.lower(), password_hash, 1 if must_change_password else 0, role),
+        )
+
+
+def set_user_password_hash(
+    email: str,
+    password_hash: str,
+    *,
+    must_change_password: bool,
+) -> None:
+    """Replace the stored password hash for a user."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE users SET password_hash = ?, must_change_password = ?, "
+            "updated_at = datetime('now') WHERE email = ?",
+            (password_hash, 1 if must_change_password else 0, email.lower()),
+        )
+
+
+def set_user_role(email: str, role: str) -> None:
+    """Update a user's role."""
+    if role not in ("admin", "end_user"):
+        raise ValueError(f"invalid role: {role!r}")
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE users SET role = ?, updated_at = datetime('now') "
+            "WHERE email = ?",
+            (role, email.lower()),
+        )
+
+
+def delete_user(email: str) -> None:
+    """Remove a user. No-op if the email isn't in the table."""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM users WHERE email = ?", (email.lower(),))
 
 
 # ---------------------------------------------------------------------------
