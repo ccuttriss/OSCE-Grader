@@ -7,7 +7,14 @@ import os
 
 
 def server_mode() -> bool:
-    return os.environ.get("OSCE_SERVER_MODE", "0") == "1"
+    """True unless explicitly disabled with ``OSCE_SERVER_MODE=0``.
+
+    Server mode is the default: key files on disk are ignored, the API-key
+    master key must come from ``OSCE_SECRET_KEY``, admin role requires an
+    entry in ``OSCE_ADMIN_EMAILS``, and retention sweeps run. Set
+    ``OSCE_SERVER_MODE=0`` only for a throwaway local-dev workstation.
+    """
+    return os.environ.get("OSCE_SERVER_MODE", "1") != "0"
 
 
 def log_json() -> bool:

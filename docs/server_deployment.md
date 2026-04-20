@@ -6,13 +6,20 @@ only env vars differ.
 
 ## Env vars
 
-See `.env.example` for the full list. Minimum required for a working
-server-mode deployment:
+See `.env.example` for the full list. **Server mode is the default** —
+you only need to set `OSCE_SERVER_MODE=0` to opt into the local-dev
+workstation path (auto-admin, key-file fallback, auto-generated master
+key). Minimum required for a working server-mode deployment:
 
-- `OSCE_SERVER_MODE=1` — enforces sign-in, disables key-file fallback
 - `OSCE_DATA_DIR=/var/lib/osce-grader` (VM) or `/data` (container)
-- `OSCE_ADMIN_EMAILS=comma,separated,list`
+- `OSCE_ADMIN_EMAILS=comma,separated,list` — emails allowed to reach the
+  admin tabs. Without this, no one can reach Models & Keys.
+- `OSCE_SECRET_KEY=<Fernet key>` — base64-encoded 32-byte key used to
+  encrypt API keys at rest. Generate with
+  `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+  Without it, the admin UI warns and stored keys remain in plaintext.
 - At least one of `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY`
+  (optional — admins can also add keys at runtime via the Models & Keys tab).
 
 ## Linux VM (systemd)
 

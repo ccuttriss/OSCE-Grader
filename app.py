@@ -3416,6 +3416,30 @@ user = identity.get_current_user()
 if user is None:
     st.title("OSCE Grader")
     st.caption("AI-powered grading for medical student post-encounter notes")
+
+    import server_env
+    in_server_mode = server_env.server_mode()
+    admin_emails_set = bool(server_env.admin_emails())
+    secret_key_set = bool(os.environ.get("OSCE_SECRET_KEY", "").strip())
+
+    # Surface bootstrap problems before the operator types anything, otherwise
+    # they'd sign in as an end_user and wonder why no admin tabs show up.
+    if in_server_mode and not admin_emails_set:
+        st.error(
+            "\U0001f6a7 **Setup incomplete.** Server mode is on but "
+            "`OSCE_ADMIN_EMAILS` isn't configured, so no one can reach the "
+            "admin tabs. Add a comma-separated list of admin emails to the "
+            "environment (or `.env`) and restart:\n\n"
+            "```\nOSCE_ADMIN_EMAILS=you@yourschool.edu\n```"
+        )
+    if in_server_mode and not secret_key_set:
+        st.warning(
+            "\u26a0\ufe0f `OSCE_SECRET_KEY` is not set. In server mode the "
+            "app will not auto-generate a master key, so any API keys "
+            "stored through the admin UI will be written **in plaintext** "
+            "until a key is provided."
+        )
+
     with st.form("sign_in", clear_on_submit=False):
         email = st.text_input("Institutional email", placeholder="you@institution.edu")
         submitted = st.form_submit_button("Continue")
@@ -3426,8 +3450,7 @@ if user is None:
         except ValueError:
             st.error("Please enter a valid email address.")
     st.caption("Your email is recorded in the audit log for this session only.")
-    import server_env
-    if server_env.server_mode():
+    if in_server_mode:
         st.info("This system is monitored. All activity is logged.")
     st.stop()
 

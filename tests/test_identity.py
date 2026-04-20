@@ -49,14 +49,27 @@ def test_is_admin_matches_allowlist(fake_streamlit, monkeypatch):
 
 
 def test_local_mode_auto_grants_admin(fake_streamlit, monkeypatch):
-    # Without OSCE_SERVER_MODE, anyone who signs in is treated as admin so
-    # local dev users can reach the admin tabs without extra config.
-    monkeypatch.delenv("OSCE_SERVER_MODE", raising=False)
+    # OSCE_SERVER_MODE=0 opts into the local-dev path: anyone who signs in
+    # is treated as admin so the operator can reach the admin tabs without
+    # needing to pre-wire OSCE_ADMIN_EMAILS on their own laptop.
+    monkeypatch.setenv("OSCE_SERVER_MODE", "0")
     monkeypatch.delenv("OSCE_ADMIN_EMAILS", raising=False)
     import identity
     user = identity.sign_in("local@example.edu")
     assert user.role == "admin"
     assert identity.is_admin(user) is True
+
+
+def test_default_is_server_mode(fake_streamlit, monkeypatch):
+    # The default (no OSCE_SERVER_MODE override) must be server mode, so an
+    # unlisted email stays as end_user even though no one explicitly set
+    # OSCE_SERVER_MODE=1.
+    monkeypatch.delenv("OSCE_SERVER_MODE", raising=False)
+    monkeypatch.delenv("OSCE_ADMIN_EMAILS", raising=False)
+    import identity
+    user = identity.sign_in("faculty@example.edu")
+    assert user.role == "end_user"
+    assert identity.is_admin(user) is False
 
 
 def test_sign_out_clears_session(fake_streamlit):
