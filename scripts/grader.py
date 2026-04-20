@@ -22,6 +22,7 @@ import pandas as pd
 
 import config
 from providers import LLMCaller, SUPPORTED_PROVIDERS, create_caller
+from run_context import RunContext  # noqa: F401  — re-exported for typing
 
 
 class GraderError(Exception):
@@ -119,12 +120,30 @@ def call_llm(
     Retries up to ``config.MAX_RETRIES`` times with exponential back-off on
     transient failures (rate-limits, network errors, server errors).
     """
+    from audit import log_event as _audit_log
     delay = config.RETRY_DELAY
     last_exception: Optional[Exception] = None
+    _provider = getattr(caller, "provider", "unknown")
+    _model = getattr(caller, "model", "unknown")
 
     for attempt in range(1, config.MAX_RETRIES + 1):
+        t0 = time.time()
         try:
-            return caller(messages, temperature, top_p)
+            response = caller(messages, temperature, top_p)
+            latency_ms = int((time.time() - t0) * 1000)
+            _audit_log(
+                "llm.call",
+                stream="system",
+                severity="info",
+                outcome="success",
+                detail={
+                    "provider": _provider,
+                    "model": _model,
+                    "latency_ms": latency_ms,
+                    "attempt": attempt,
+                },
+            )
+            return response
         except Exception as exc:
             last_exception = exc
             if attempt < config.MAX_RETRIES:
@@ -135,6 +154,19 @@ def call_llm(
                     exc,
                 )
                 logger.info("Retrying in %ds...", delay)
+                _audit_log(
+                    "llm.retry",
+                    stream="system",
+                    severity="warn",
+                    outcome="failure",
+                    error_code=type(exc).__name__,
+                    detail={
+                        "provider": _provider,
+                        "model": _model,
+                        "attempt": attempt,
+                        "retry_delay_s": delay,
+                    },
+                )
                 time.sleep(delay)
                 delay *= 2  # exponential back-off
             else:
@@ -142,6 +174,18 @@ def call_llm(
                     "API call failed after %d attempts: %s",
                     config.MAX_RETRIES,
                     exc,
+                )
+                _audit_log(
+                    "llm.failure",
+                    stream="system",
+                    severity="error",
+                    outcome="failure",
+                    error_code=type(exc).__name__,
+                    detail={
+                        "provider": _provider,
+                        "model": _model,
+                        "attempt": attempt,
+                    },
                 )
                 raise last_exception  # type: ignore[misc]
 
@@ -372,6 +416,8 @@ def process_assessment(
     top_p: float,
     max_workers: int = 4,
     progress_callback=None,
+    *,
+    ctx: "RunContext | None" = None,
 ) -> pd.DataFrame:
     """Grade student responses using any AssessmentType implementation.
 
@@ -387,10 +433,16 @@ def process_assessment(
         top_p: LLM top-p parameter.
         max_workers: Number of sections to grade in parallel per student.
         progress_callback: Optional callable(current, total) for progress.
+        ctx: Optional RunContext whose settings override temperature/top_p/workers.
 
     Returns:
         The results DataFrame.
     """
+    if ctx is not None:
+        temperature = ctx.temperature
+        top_p = ctx.top_p
+        max_workers = ctx.workers
+
     from assessment_types.base import GradingResult
 
     log_file = os.path.splitext(output_file)[0] + ".log"
@@ -782,6 +834,17 @@ def process_excel_file_with_key(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    import server_env
+    server_env.configure_logging()
+    from audit import log_event
+    log_event("app.start", stream="system", severity="info", detail={"surface": "cli"})
+    import server_env
+    if server_env.server_mode():
+        from audit import retention_sweep
+        retention_sweep(
+            user_days=server_env.audit_retention_user_days(),
+            system_days=server_env.audit_retention_system_days(),
+        )
     parser = argparse.ArgumentParser(
         description="Grade OSCE post-encounter notes from an Excel file "
         "using an LLM with a rubric and answer key.",
@@ -849,19 +912,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # --- Configure console logging ---
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(levelname)s: %(message)s",
-    )
-
     # --- Resolve model for the selected provider ---
     if args.model:
-        config.MODEL = args.model
+        model = args.model
     elif args.provider != config.PROVIDER:
         # User switched providers via CLI but didn't specify --model.
         # Use the provider's default model instead of the config.py default.
-        config.MODEL = config.DEFAULT_MODELS.get(args.provider, config.MODEL)
+        model = config.DEFAULT_MODELS.get(args.provider, config.MODEL)
+    else:
+        model = config.MODEL
 
     # --- Validate parameter ranges ---
     max_temp = 1.0 if args.provider == "anthropic" else 2.0
@@ -897,12 +956,16 @@ def main() -> None:
         raise SystemExit(1)
 
     # --- Initialise the LLM caller ---
-    caller = create_caller(args.provider)
-    logger.info("Provider: %s | Model: %s", args.provider, config.MODEL)
+    caller = create_caller(args.provider, model)
+    logger.info("Provider: %s | Model: %s", args.provider, model)
 
     rubric_content, answer_key_content = read_rubric_and_key(
         args.rubric, args.answer_key
     )
+
+    # Note: the CLI grader uses the legacy process_excel_file_with_key path which
+    # doesn't consume a RunContext. Local `model` and argparse values drive it
+    # directly. A future change can thread RunContext through that legacy path.
     process_excel_file_with_key(
         caller,
         args.notes,

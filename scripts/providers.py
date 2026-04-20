@@ -50,7 +50,12 @@ def get_api_key(provider: str) -> str:
     if env_key:
         return env_key
 
-    # 2. Check provider-specific key file
+    # 2. Check provider-specific key file (blocked in server mode)
+    import server_env
+    if server_env.server_mode():
+        raise RuntimeError(
+            f"{env_var} not set. In OSCE_SERVER_MODE=1, only env vars are consulted."
+        )
     key_path = os.path.join(SCRIPT_DIR, key_file)
     key = _read_key_file(key_path)
     if key:

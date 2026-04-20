@@ -16,12 +16,13 @@ from typing import Optional
 
 logger = logging.getLogger("osce_grader.database")
 
-DB_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "osce_grader.db",
-)
+def _default_db_path() -> str:
+    import server_env
+    return server_env.db_path()
 
-CURRENT_SCHEMA_VERSION = 1
+DB_PATH = _default_db_path()
+
+CURRENT_SCHEMA_VERSION = 4
 
 # ---------------------------------------------------------------------------
 # Connection management
@@ -126,22 +127,115 @@ CREATE TABLE IF NOT EXISTS grading_runs (
     results_json       TEXT,
     log_text           TEXT
 );
+
+CREATE TABLE IF NOT EXISTS audit_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT    NOT NULL DEFAULT (datetime('now')),
+    stream          TEXT    NOT NULL CHECK (stream IN ('user','system')),
+    severity        TEXT    NOT NULL CHECK (severity IN ('info','warn','error')),
+    action          TEXT    NOT NULL,
+    actor_email     TEXT,
+    actor_role      TEXT,
+    session_id      TEXT,
+    request_id      TEXT,
+    target_kind     TEXT,
+    target_id       TEXT,
+    target_hash     TEXT,
+    outcome         TEXT    NOT NULL CHECK (outcome IN ('success','failure','denied')),
+    error_code      TEXT,
+    detail_json     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts            ON audit_events(ts);
+CREATE INDEX IF NOT EXISTS idx_audit_actor         ON audit_events(actor_email, ts);
+CREATE INDEX IF NOT EXISTS idx_audit_stream_action ON audit_events(stream, action, ts);
+CREATE INDEX IF NOT EXISTS idx_audit_target        ON audit_events(target_kind, target_id);
+
+CREATE TABLE IF NOT EXISTS materials (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind            TEXT    NOT NULL CHECK (kind IN (
+                        'rubric','answer_key','student_notes','exemplar')),
+    display_name    TEXT    NOT NULL,
+    filename        TEXT    NOT NULL,
+    content_sha256  TEXT    NOT NULL,
+    size_bytes      INTEGER NOT NULL,
+    mime_type       TEXT,
+    assessment_type TEXT,
+    uploaded_by     TEXT    NOT NULL,
+    uploaded_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+    archived_at     TEXT,
+    notes           TEXT,
+    UNIQUE (content_sha256, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_materials_kind     ON materials(kind);
+CREATE INDEX IF NOT EXISTS idx_materials_assess   ON materials(assessment_type);
+CREATE INDEX IF NOT EXISTS idx_materials_archived ON materials(archived_at);
+
+CREATE TABLE IF NOT EXISTS material_tags (
+    material_id INTEGER NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+    tag         TEXT    NOT NULL,
+    PRIMARY KEY (material_id, tag)
+);
 """
+
+
+def _apply_migration_v4(conn: sqlite3.Connection) -> None:
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(grading_runs)").fetchall()]
+    adds = [
+        ("run_uuid",                "TEXT"),
+        ("user_email",              "TEXT"),
+        ("auth_session_id",         "TEXT"),
+        ("provider",                "TEXT"),
+        ("top_p",                   "REAL"),
+        ("workers",                 "INTEGER"),
+        ("max_tokens",              "INTEGER"),
+        ("sections_json",           "TEXT"),
+        ("rubric_material_id",      "INTEGER"),
+        ("answer_key_material_id",  "INTEGER"),
+        ("student_notes_sha256",    "TEXT"),
+        ("summary_json",            "TEXT"),
+        ("results_sha256",          "TEXT"),
+    ]
+    for name, typ in adds:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE grading_runs ADD COLUMN {name} {typ}")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_grading_runs_run_uuid "
+        "ON grading_runs(run_uuid) WHERE run_uuid IS NOT NULL"
+    )
 
 
 def init_db() -> None:
     """Create tables if they don't exist. Idempotent."""
     with get_connection() as conn:
         conn.executescript(_SCHEMA_SQL)
-        row = conn.execute(
-            "SELECT MAX(version) FROM schema_version"
+        current_row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version"
         ).fetchone()
-        if row[0] is None:
+        current = current_row[0]
+        if current < 4:
+            _apply_migration_v4(conn)
+        if current < CURRENT_SCHEMA_VERSION:
             conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?)",
                 (CURRENT_SCHEMA_VERSION,),
             )
-            logger.info("Database initialized at version %d", CURRENT_SCHEMA_VERSION)
+            logger.info(
+                "Database migrated from v%d to v%d", current, CURRENT_SCHEMA_VERSION,
+            )
+            try:
+                from audit import log_event
+                log_event(
+                    "db.migration",
+                    stream="system",
+                    severity="info",
+                    detail={"from": current, "to": CURRENT_SCHEMA_VERSION},
+                )
+            except Exception:
+                # Audit emission is best-effort during bootstrap; swallow if
+                # the audit module isn't importable (e.g., during schema init
+                # itself before tables exist on a fresh DB). log_event already
+                # has its own never-raise guard, but this catches import errors.
+                pass
 
 
 # ---------------------------------------------------------------------------

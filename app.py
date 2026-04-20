@@ -13,8 +13,17 @@ import logging
 import os
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+# ---------------------------------------------------------------------------
+# Module-level sentinel: ensure the daily retention sweep thread is started
+# at most once per process regardless of how many times Streamlit reruns this
+# module.  Python only imports a module once, so these objects persist.
+# ---------------------------------------------------------------------------
+_sweep_lock = threading.Lock()
+_sweep_scheduled = False
 
 import pandas as pd
 import streamlit as st
@@ -41,6 +50,7 @@ from providers import create_caller
 from convert_rubric import convert_docx_to_text, convert_pdf_to_text
 from assessment_types import REGISTRY, get_type
 from grader import process_assessment
+from run_context import run_context_from_streamlit
 from gold_standard import (
     load_faculty_session,
     validate_sessions,
@@ -75,7 +85,8 @@ from synthetic_generator import (
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+import server_env
+server_env.configure_logging()
 logger = logging.getLogger("osce_grader.streamlit")
 
 # ---------------------------------------------------------------------------
@@ -87,6 +98,24 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+from audit import log_event
+if not st.session_state.get("_osce_app_start_logged"):
+    log_event("app.start", stream="system", severity="info", detail={"surface": "streamlit"})
+    st.session_state["_osce_app_start_logged"] = True
+import server_env
+if server_env.server_mode():
+    from audit import schedule_daily_sweep, retention_sweep
+    with _sweep_lock:
+        if not _sweep_scheduled:
+            retention_sweep(
+                user_days=server_env.audit_retention_user_days(),
+                system_days=server_env.audit_retention_system_days(),
+            )
+            schedule_daily_sweep(
+                user_days=server_env.audit_retention_user_days(),
+                system_days=server_env.audit_retention_system_days(),
+            )
+            globals()["_sweep_scheduled"] = True
 
 # ---------------------------------------------------------------------------
 # Model benchmark data
@@ -452,22 +481,86 @@ def tab_grade_notes():
                 use_synthetic = False
 
     # --- Dynamic file uploads (shown when not using synthetic data) ---
+    import material_library as ml
     required_files = assessment_type.get_required_files()
     uploaded_files = {}
     detected_sections = []
 
+    # Library pickers for rubric and answer key
+    rubric_choice = None
+    ak_choice = None
+    keep_in_library = False
+
     if not use_synthetic:
-        file_cols = st.columns(len(required_files))
-        for i, file_spec in enumerate(required_files):
-            with file_cols[i]:
-                label = file_spec["label"]
-                if not file_spec.get("required", True):
-                    label += " (optional)"
-                uploaded_files[file_spec["key"]] = st.file_uploader(
-                    label,
-                    type=file_spec["types"],
-                    key=f"upload_{file_spec['key']}",
-                )
+        # --- Library pickers for rubric and answer key ---
+        rubric_options = ml.list_materials(kind="rubric", assessment_type=selected_type_id)
+        answer_options = ml.list_materials(kind="answer_key", assessment_type=selected_type_id)
+
+        rubric_choice = st.selectbox(
+            "Rubric (from library)",
+            options=[None] + rubric_options,
+            format_func=lambda m: "(upload below)" if m is None else f"{m.display_name} ({m.uploaded_at[:10]})",
+            key="gn_rubric_pick",
+        )
+        ak_choice = st.selectbox(
+            "Answer key (from library)",
+            options=[None] + answer_options,
+            format_func=lambda m: "(upload below)" if m is None else f"{m.display_name} ({m.uploaded_at[:10]})",
+            key="gn_ak_pick",
+        )
+
+        with st.expander("…or upload a new rubric / answer key"):
+            col1, col2 = st.columns(2)
+            with col1:
+                nr = st.file_uploader("Rubric", key="gn_rubric_new", type=["xlsx", "csv", "pdf", "docx"])
+                if nr is not None:
+                    _user = identity.get_current_user()
+                    ml.save_material(
+                        "rubric", file=nr, filename=nr.name,
+                        display_name=f"(inline) {nr.name}", assessment_type=selected_type_id,
+                        uploaded_by=_user.email, uploaded_by_user=_user,
+                    )
+                    st.rerun()
+            with col2:
+                na = st.file_uploader("Answer key", key="gn_ak_new", type=["xlsx", "csv"])
+                if na is not None:
+                    _user = identity.get_current_user()
+                    ml.save_material(
+                        "answer_key", file=na, filename=na.name,
+                        display_name=f"(inline) {na.name}", assessment_type=selected_type_id,
+                        uploaded_by=_user.email, uploaded_by_user=_user,
+                    )
+                    st.rerun()
+
+        st.divider()
+
+        # --- Remaining file uploaders (responses / faculty scores / etc.) ---
+        other_file_specs = [fs for fs in required_files if fs["key"] not in ("rubric", "answer_key")]
+        if other_file_specs:
+            file_cols = st.columns(len(other_file_specs))
+            for i, file_spec in enumerate(other_file_specs):
+                with file_cols[i]:
+                    label = file_spec["label"]
+                    if not file_spec.get("required", True):
+                        label += " (optional)"
+                    uploaded_files[file_spec["key"]] = st.file_uploader(
+                        label,
+                        type=file_spec["types"],
+                        key=f"upload_{file_spec['key']}",
+                    )
+
+        # Keep rubric/answer_key uploaders in uploaded_files as None (satisfied by picker)
+        for fs in required_files:
+            if fs["key"] in ("rubric", "answer_key"):
+                uploaded_files.setdefault(fs["key"], None)
+
+        # keep_in_library checkbox for student notes
+        keep_in_library = st.checkbox(
+            "Keep this student-notes file in the library",
+            value=False,
+            help="Check this box only if you want to re-run this file later. Student notes often contain PII.",
+            key="gn_keep_notes",
+        )
 
         # --- Previews ---
         for file_spec in required_files:
@@ -582,7 +675,15 @@ def tab_grade_notes():
     def _validate():
         if not use_synthetic:
             for file_spec in required_files:
-                if file_spec.get("required", True) and not uploaded_files.get(file_spec["key"]):
+                key = file_spec["key"]
+                if not file_spec.get("required", True):
+                    continue
+                # rubric/answer_key may be satisfied by library picker
+                if key == "rubric" and rubric_choice is not None:
+                    continue
+                if key == "answer_key" and ak_choice is not None:
+                    continue
+                if not uploaded_files.get(key):
                     st.error(f"Please upload: {file_spec['label']}")
                     return False
         if not has_env_key and not api_key_input:
@@ -595,13 +696,13 @@ def tab_grade_notes():
         if api_key_input and not has_env_key:
             _save_api_key_to_env(env_var, api_key_input)
 
-    # --- Set config for the selected model ---
-    def _set_config():
-        config.MODEL = selected_model
-        config.PROVIDER = provider
-        config.TEMPERATURE = temperature
-        if detected_sections:
-            config.SECTIONS = detected_sections
+    # --- Helper: materialise a Material to a temp file path ---
+    def _material_to_path(m) -> str:
+        with ml.open_material(m) as src:
+            fd, path = tempfile.mkstemp(suffix=os.path.splitext(m.filename)[1])
+            with os.fdopen(fd, "wb") as dst:
+                dst.write(src.read())
+        return path
 
     # --- Helper: resolve file paths from uploads or synthetic data ---
     def _resolve_paths() -> dict:
@@ -609,10 +710,39 @@ def tab_grade_notes():
         if use_synthetic:
             return _get_synthetic_files(selected_type_id) or {}
         paths = {}
+        # rubric from library picker or upload
+        if rubric_choice is not None:
+            paths["rubric"] = _material_to_path(rubric_choice)
+        elif uploaded_files.get("rubric"):
+            paths["rubric"] = _save_upload(uploaded_files["rubric"])
+        # answer_key from library picker or upload
+        if ak_choice is not None:
+            paths["answer_key"] = _material_to_path(ak_choice)
+        elif uploaded_files.get("answer_key"):
+            paths["answer_key"] = _save_upload(uploaded_files["answer_key"])
+        # remaining files (responses, scores, etc.)
         for file_spec in required_files:
-            uf = uploaded_files.get(file_spec["key"])
+            key = file_spec["key"]
+            if key in ("rubric", "answer_key"):
+                continue
+            uf = uploaded_files.get(key)
             if uf:
-                paths[file_spec["key"]] = _save_upload(uf)
+                paths[key] = _save_upload(uf)
+        # save student notes to library if user opted in
+        if keep_in_library:
+            notes_uf = uploaded_files.get("responses")
+            if notes_uf:
+                _user = identity.get_current_user()
+                notes_uf.seek(0)
+                ml.save_material(
+                    "student_notes",
+                    file=notes_uf,
+                    filename=notes_uf.name,
+                    display_name=f"(inline) {notes_uf.name}",
+                    assessment_type=selected_type_id,
+                    uploaded_by=_user.email, uploaded_by_user=_user,
+                )
+                notes_uf.seek(0)
         return paths
 
     # --- Dry Run ---
@@ -621,7 +751,6 @@ def tab_grade_notes():
             return
 
         _set_api_key()
-        _set_config()
 
         if is_uk:
             paths = _resolve_paths()
@@ -670,7 +799,6 @@ def tab_grade_notes():
             return
 
         _set_api_key()
-        _set_config()
 
         # Output paths
         output_dir = os.path.join(REPO_ROOT, "uploads_tmp")
@@ -679,7 +807,7 @@ def tab_grade_notes():
         log_file = os.path.join(output_dir, "results_streamlit.log")
 
         try:
-            caller = create_caller(provider)
+            caller = create_caller(provider, model=selected_model)
         except SystemExit:
             st.error(f"Failed to create {PROVIDER_LABELS[provider]} caller. Check your API key.")
             return
@@ -703,7 +831,7 @@ def tab_grade_notes():
                 st.error(f"Failed to read student notes: {e}")
                 return
 
-            sections = config.SECTIONS
+            sections = detected_sections if detected_sections else config.SECTIONS
             missing = validate_input_columns(df, sections)
             if missing:
                 st.error(f"Missing columns in student notes: {', '.join(missing)}")
@@ -783,6 +911,10 @@ def tab_grade_notes():
 
         else:
             # ---- KPSOM grading path ----
+            import hashlib
+            import grading_runs as gr
+            import audit as _audit
+
             saved_paths = _resolve_paths()
 
             sections = assessment_type.get_sections()
@@ -797,6 +929,51 @@ def tab_grade_notes():
                     status.update(label=f"Grading student {current + 1} of {total}...")
                     status.write(f"Processing student {current + 1}...")
 
+            user = identity.get_current_user()
+            ctx = run_context_from_streamlit(
+                provider=provider,
+                model=selected_model,
+                temperature=temperature,
+                top_p=config.TOP_P,
+                workers=workers,
+                max_tokens=config.MAX_TOKENS,
+                assessment_type=selected_type_id,
+                sections=sections,
+                actor_email=user.email,
+                actor_role=user.role,
+                auth_session_id=user.session_id,
+            )
+
+            # Hash student notes file
+            _notes_path = saved_paths.get("responses", "")
+            if _notes_path and os.path.isfile(_notes_path):
+                with open(_notes_path, "rb") as _f:
+                    _notes_sha = hashlib.sha256(_f.read()).hexdigest()
+            else:
+                _notes_sha = ""
+
+            _run_row_id = gr.begin_run(
+                run_uuid=ctx.run_id,
+                user_email=user.email,
+                auth_session_id=user.session_id,
+                assessment_type_id=selected_type_id,
+                provider=ctx.provider,
+                model=ctx.model,
+                temperature=ctx.temperature,
+                top_p=ctx.top_p,
+                workers=ctx.workers,
+                max_tokens=ctx.max_tokens,
+                sections=ctx.sections,
+                rubric_material_id=(rubric_choice.id if rubric_choice is not None else None),
+                answer_key_material_id=(ak_choice.id if ak_choice is not None else None),
+                student_notes_sha256=_notes_sha,
+            )
+            _audit.log_event(
+                "grading.run.start", stream="user", actor=user,
+                target_kind="run", target_id=ctx.run_id,
+                detail={"provider": ctx.provider, "model": ctx.model},
+            )
+
             try:
                 result_df = process_assessment(
                     assessment_type,
@@ -807,11 +984,41 @@ def tab_grade_notes():
                     config.TOP_P,
                     max_workers=workers,
                     progress_callback=_kpsom_progress,
+                    ctx=ctx,
                 )
+
+                with open(output_file, "rb") as _f:
+                    _results_bytes = _f.read()
+                _results_sha = gr.store_results_file(_results_bytes)
+                gr.complete_run(_run_row_id, results_sha256=_results_sha, summary={"rows": len(result_df)})
+                _audit.log_event(
+                    "grading.run.complete", stream="user", actor=user,
+                    target_kind="run", target_id=ctx.run_id,
+                    detail={"rows": len(result_df), "results_sha": _results_sha},
+                )
+                st.session_state["results_run_uuid"] = ctx.run_id
+                st.session_state["results_sha"] = _results_sha
+
             except (SystemExit, ValueError) as e:
+                gr.cancel_run(_run_row_id, reason=str(e)[:200])
+                _audit.log_event(
+                    "grading.run.cancel", stream="user", actor=user,
+                    severity="error", outcome="failure",
+                    target_kind="run", target_id=ctx.run_id,
+                    error_code=type(e).__name__,
+                    detail={"error": str(e)[:200]},
+                )
                 st.error(f"Grading failed: {e}")
                 return
             except Exception as e:
+                gr.cancel_run(_run_row_id, reason=str(e)[:200])
+                _audit.log_event(
+                    "grading.run.cancel", stream="user", actor=user,
+                    severity="error", outcome="failure",
+                    target_kind="run", target_id=ctx.run_id,
+                    error_code=type(e).__name__,
+                    detail={"error": str(e)[:200]},
+                )
                 st.error(f"Unexpected error during grading: {e}")
                 return
 
@@ -895,6 +1102,19 @@ def _display_grading_results():
         dcol1, dcol2 = st.columns(2)
         with dcol1:
             with open(output_file, "rb") as f:
+                # Emit results.download audit event when the download button is shown.
+                # In Streamlit, the event fires on tab render (each rerun while results
+                # are displayed), which is the earliest point we can reliably log it.
+                import audit as _audit
+                _dl_user = identity.get_current_user()
+                _dl_run_uuid = st.session_state.get("results_run_uuid")
+                _dl_results_sha = st.session_state.get("results_sha")
+                if _dl_run_uuid:
+                    _audit.log_event(
+                        "results.download", stream="user", actor=_dl_user,
+                        target_kind="run", target_id=_dl_run_uuid,
+                        target_hash=_dl_results_sha,
+                    )
                 st.download_button(
                     "Download Results (.xlsx)",
                     data=f.read(),
@@ -1240,6 +1460,20 @@ def tab_flagged():
 # TAB 4: CONVERT RUBRIC
 # =========================================================================
 def tab_convert():
+    user = identity.get_current_user()
+    if not identity.is_admin(user):
+        import audit
+        audit.log_event(
+            "tab.access.denied",
+            stream="user",
+            actor=user,
+            severity="warn",
+            outcome="denied",
+            target_kind="tab",
+            target_id="convert",
+        )
+        st.error("This tab requires admin privileges.")
+        return
     st.header("Convert Rubric")
     st.markdown(
         "Upload a PDF or DOCX rubric and the AI will parse it into section columns "
@@ -1302,21 +1536,12 @@ def tab_convert():
 
         with st.spinner("Parsing rubric with AI..."):
             try:
-                old_model = config.MODEL
-                old_provider = config.PROVIDER
-                config.MODEL = convert_model
-                config.PROVIDER = convert_provider
-
-                caller = create_caller(convert_provider)
+                caller = create_caller(convert_provider, model=convert_model)
                 messages = [
                     {"role": "system", "content": config.CONVERT_PROMPT},
                     {"role": "user", "content": raw_text},
                 ]
                 response = call_llm(caller, messages, temperature=0.0, top_p=1.0)
-
-                # Restore config
-                config.MODEL = old_model
-                config.PROVIDER = old_provider
 
                 # Parse JSON response
                 import json
@@ -1375,6 +1600,20 @@ def tab_convert():
 # TAB 5: GOLD STANDARD ANALYSIS
 # =========================================================================
 def tab_gold_standard():
+    user = identity.get_current_user()
+    if not identity.is_admin(user):
+        import audit
+        audit.log_event(
+            "tab.access.denied",
+            stream="user",
+            actor=user,
+            severity="warn",
+            outcome="denied",
+            target_kind="tab",
+            target_id="gold_standard",
+        )
+        st.error("This tab requires admin privileges.")
+        return
     st.header("Gold Standard Analysis")
     st.markdown(
         "Upload 2\u201310 faculty score files from different administrations of the same "
@@ -1940,6 +2179,20 @@ def tab_gold_standard():
 
 
 def tab_synthetic_generator():
+    user = identity.get_current_user()
+    if not identity.is_admin(user):
+        import audit
+        audit.log_event(
+            "tab.access.denied",
+            stream="user",
+            actor=user,
+            severity="warn",
+            outcome="denied",
+            target_kind="tab",
+            target_id="synthetic",
+        )
+        st.error("This tab requires admin privileges.")
+        return
     st.header("Synthetic Data Generator")
     st.markdown(
         "Generate realistic, end-to-end OSCE test data using independent LLM agents. "
@@ -2519,34 +2772,202 @@ def tab_synthetic_generator():
 
 
 # =========================================================================
+# Tab 7 — Source Materials
+# =========================================================================
+
+
+def tab_source_materials():
+    import material_library as ml
+    user = identity.get_current_user()
+    st.subheader("Source Materials")
+
+    cols = st.columns([2, 1, 1, 1])
+    with cols[0]:
+        search = st.text_input("Search by name", key="sm_search")
+    with cols[1]:
+        kind_filter = st.selectbox(
+            "Kind", ["(all)", "rubric", "answer_key", "exemplar", "student_notes"],
+            key="sm_kind",
+        )
+    with cols[2]:
+        from assessment_types import REGISTRY
+        atypes = ["(all)"] + list(REGISTRY.keys())
+        atype_filter = st.selectbox("Assessment type", atypes, key="sm_atype")
+    with cols[3]:
+        show_archived = st.checkbox("Include archived", value=False, key="sm_arch")
+
+    items = ml.list_materials(
+        kind=None if kind_filter == "(all)" else kind_filter,
+        assessment_type=None if atype_filter == "(all)" else atype_filter,
+        include_archived=show_archived,
+    )
+    if search:
+        items = [m for m in items if search.lower() in m.display_name.lower()]
+
+    import pandas as pd
+    df = pd.DataFrame([
+        {"id": m.id, "name": m.display_name, "kind": m.kind,
+         "assessment": m.assessment_type, "uploader": m.uploaded_by,
+         "uploaded_at": m.uploaded_at, "archived": bool(m.archived_at)}
+        for m in items
+    ])
+    st.dataframe(df, use_container_width=True)
+
+    with st.expander("Upload new material"):
+        with st.form("upload_material"):
+            kind = st.selectbox("Kind", ["rubric", "answer_key", "exemplar", "student_notes"])
+            name = st.text_input("Display name")
+            atype = st.selectbox("Assessment type", list(REGISTRY.keys()))
+            tags_raw = st.text_input("Tags (comma-separated, optional)")
+            notes = st.text_area("Notes (optional)")
+            f = st.file_uploader("File", type=["xlsx", "csv", "pdf", "docx"])
+            if st.form_submit_button("Upload") and f is not None and name:
+                ml.save_material(
+                    kind,  # type: ignore[arg-type]
+                    file=f, filename=f.name,
+                    display_name=name, assessment_type=atype,
+                    tags=[t.strip() for t in tags_raw.split(",") if t.strip()],
+                    uploaded_by=user.email, notes=notes or None,
+                    uploaded_by_user=user,
+                )
+                st.success(f"Uploaded {f.name}")
+                st.rerun()
+
+
+# =========================================================================
+# Tab 8 — Audit Log
+# =========================================================================
+
+
+def tab_audit_log():
+    user = identity.get_current_user()
+    if not identity.is_admin(user):
+        import audit
+        audit.log_event(
+            "tab.access.denied", stream="user", actor=user,
+            severity="warn", outcome="denied",
+            target_kind="tab", target_id="audit_log",
+        )
+        st.error("This tab requires admin privileges.")
+        return
+
+    import audit
+    from datetime import datetime, timedelta
+
+    st.subheader("Audit Log")
+    cols = st.columns(4)
+    with cols[0]:
+        stream = st.selectbox("Stream", ["(all)", "user", "system"])
+    with cols[1]:
+        since = st.date_input("Since", value=(datetime.utcnow() - timedelta(days=7)).date())
+    with cols[2]:
+        until = st.date_input("Until", value=datetime.utcnow().date())
+    with cols[3]:
+        actor = st.text_input("Actor email (exact)")
+
+    action = st.text_input("Action (exact, optional)")
+    severity = st.selectbox("Severity", ["(all)", "info", "warn", "error"])
+
+    events = audit.query_events(
+        stream=None if stream == "(all)" else stream,
+        actor_email=actor or None,
+        action=action or None,
+        severity=None if severity == "(all)" else severity,
+        since=datetime.combine(since, datetime.min.time()),
+        until=datetime.combine(until, datetime.max.time()),
+        limit=2000,
+    )
+
+    import pandas as pd
+    df = pd.DataFrame([{
+        "ts": e.ts, "stream": e.stream, "severity": e.severity,
+        "action": e.action, "actor_email": e.actor_email,
+        "outcome": e.outcome,
+        "target": f"{e.target_kind}:{e.target_id}" if e.target_kind else "",
+        "error_code": e.error_code, "detail": e.detail_json,
+    } for e in events])
+    st.dataframe(df, use_container_width=True)
+
+    if st.button("Export to CSV"):
+        import io
+        buf = io.StringIO()
+        df.to_csv(buf, index=False)
+        st.download_button(
+            "Download audit_log.csv",
+            data=buf.getvalue(),
+            file_name=f"audit_log_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+        )
+        audit.log_event(
+            "audit.export", stream="user", actor=user,
+            detail={"rows": len(df)},
+        )
+
+
+# =========================================================================
 # Main app layout
 # =========================================================================
-st.title("OSCE Grader")
-st.caption("AI-powered grading for medical student post-encounter notes")
+import identity
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "Grade Notes",
-    "Analysis Dashboard",
-    "Flagged Items",
-    "Convert Rubric",
-    "Gold Standard",
-    "Synthetic Data",
-])
+user = identity.get_current_user()
+if user is None:
+    st.title("OSCE Grader")
+    st.caption("AI-powered grading for medical student post-encounter notes")
+    with st.form("sign_in", clear_on_submit=False):
+        email = st.text_input("Institutional email", placeholder="you@institution.edu")
+        submitted = st.form_submit_button("Continue")
+    if submitted:
+        try:
+            identity.sign_in(email)
+            st.rerun()
+        except ValueError:
+            st.error("Please enter a valid email address.")
+    st.caption("Your email is recorded in the audit log for this session only.")
+    import server_env
+    if server_env.server_mode():
+        st.info("This system is monitored. All activity is logged.")
+    st.stop()
 
-with tab1:
-    tab_grade_notes()
+# Header shown after sign-in
+hdr_left, hdr_right = st.columns([3, 1])
+with hdr_left:
+    st.title("OSCE Grader")
+    st.caption("AI-powered grading for medical student post-encounter notes")
+with hdr_right:
+    st.markdown(f"**{user.email}**  \n_role: {user.role}_")
+    if st.button("Sign out"):
+        identity.sign_out()
+        st.rerun()
 
-with tab2:
-    tab_analysis()
+ALL_TABS = [
+    ("Grade Notes",        tab_grade_notes,          "end_user"),
+    ("Analysis Dashboard", tab_analysis,             "end_user"),
+    ("Flagged Items",      tab_flagged,              "end_user"),
+    ("Source Materials",   tab_source_materials,     "end_user"),
+    ("Convert Rubric",     tab_convert,              "admin"),
+    ("Gold Standard",      tab_gold_standard,        "admin"),
+    ("Synthetic Data",     tab_synthetic_generator,  "admin"),
+    ("Audit Log",          tab_audit_log,                                            "admin"),
+]
 
-with tab3:
-    tab_flagged()
+visible = [t for t in ALL_TABS if t[2] == "end_user" or identity.is_admin(user)]
+tab_objects = st.tabs([t[0] for t in visible])
 
-with tab4:
-    tab_convert()
-
-with tab5:
-    tab_gold_standard()
-
-with tab6:
-    tab_synthetic_generator()
+import hashlib
+import traceback
+try:
+    for tab_obj, (_name, handler, _role) in zip(tab_objects, visible):
+        with tab_obj:
+            handler()
+except Exception as exc:
+    stack = traceback.format_exc()
+    stack_hash = hashlib.sha256(stack.encode()).hexdigest()[:16]
+    log_event(
+        "app.error",
+        stream="system",
+        severity="error",
+        outcome="failure",
+        error_code=type(exc).__name__,
+        detail={"stack_hash": stack_hash, "message": str(exc)[:200]},
+    )
+    raise

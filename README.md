@@ -209,3 +209,6 @@ See [`LICENSE`](LICENSE) for details.
 
 ## Contributions
 Contributions are welcome! If you improve the script or add new features, submit a **pull request** or open an **issue**.
+
+## Server Deployment
+See [`docs/server_deployment.md`](docs/server_deployment.md) for VM and container deployment guides.
