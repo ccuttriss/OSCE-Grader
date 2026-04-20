@@ -134,6 +134,13 @@ MODEL_INFO = {
         "cost_1k": 1.62,
         "bias": None,
     },
+    "gpt-5-mini": {
+        "provider": "openai",
+        "accuracy": None,
+        "cost_1k": 4.86,
+        "bias": None,
+        "badges": ["New"],
+    },
     "claude-sonnet-4-6": {
         "provider": "anthropic",
         "accuracy": 99,
@@ -604,21 +611,30 @@ def tab_grade_notes():
     # Default to gemini-2.5-flash (Recommended)
     default_idx = model_options.index("gemini-2.5-flash") if "gemini-2.5-flash" in model_options else 0
 
+    def _format_model_option(m: str) -> str:
+        info = MODEL_INFO[m]
+        provider = PROVIDER_LABELS[info["provider"]]
+        accuracy_text = (
+            f"{info['accuracy']}% accuracy"
+            if info["accuracy"] is not None
+            else "not yet benchmarked"
+        )
+        label = f"{m} ({provider}) — {accuracy_text}, ${info['cost_1k']:.2f}/1K students"
+        if info.get("badges"):
+            label += f" — {', '.join(info['badges'])}"
+        return label
+
     selected_model = st.radio(
         "Choose a model",
         model_options,
         index=default_idx,
-        format_func=lambda m: (
-            f"{m} ({PROVIDER_LABELS[MODEL_INFO[m]['provider']]}) — "
-            f"{MODEL_INFO[m]['accuracy']}% accuracy, ${MODEL_INFO[m]['cost_1k']:.2f}/1K students"
-            + (f" — {', '.join(MODEL_INFO[m].get('badges', []))}" if MODEL_INFO[m].get("badges") else "")
-        ),
+        format_func=_format_model_option,
         key="model_select",
     )
 
     info = MODEL_INFO[selected_model]
     mcol1, mcol2, mcol3, mcol4 = st.columns(4)
-    mcol1.metric("Accuracy", f"{info['accuracy']}%")
+    mcol1.metric("Accuracy", f"{info['accuracy']}%" if info['accuracy'] is not None else "N/A")
     mcol2.metric("Cost / 1K students", f"${info['cost_1k']:.2f}")
     mcol3.metric("Bias", f"{info['bias']:+.2f}" if info['bias'] is not None else "N/A")
     if info.get("badges"):
@@ -2310,6 +2326,7 @@ def tab_synthetic_generator():
         "gemini-2.5-pro": ("Google", "google"),
         "gpt-4o": ("OpenAI", "openai"),
         "gpt-4o-mini": ("OpenAI", "openai"),
+        "gpt-5-mini": ("OpenAI", "openai"),
         "claude-sonnet-4-6": ("Anthropic", "anthropic"),
         "claude-haiku-4-5": ("Anthropic", "anthropic"),
     }
