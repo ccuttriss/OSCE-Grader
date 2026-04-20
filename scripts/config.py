@@ -88,6 +88,7 @@ MODEL_COSTS = {
     # OpenAI
     "gpt-4o":              (2.50, 10.00),
     "gpt-4o-mini":         (0.15,  0.60),
+    "gpt-5-mini":          (0.25,  2.00),
     # Anthropic
     "claude-sonnet-4-6":   (3.00, 15.00),
     "claude-haiku-4-5":    (1.00,  5.00),

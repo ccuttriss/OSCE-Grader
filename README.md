@@ -136,6 +136,7 @@ This produces a report showing:
 |----------|-------|------|-------|
 | OpenAI | gpt-4o | Premium | Best within-1 accuracy (99%) |
 | OpenAI | gpt-4o-mini | Budget | Lower cost, slightly less accurate |
+| OpenAI | gpt-5-mini | Budget | Newer OpenAI mini model, not yet benchmarked |
 | Anthropic | claude-sonnet-4-6 | Premium | Excellent MAE and exact agreement |
 | Anthropic | claude-haiku-4-5 | Budget | Best calibration (near-zero bias) |
 | Google | gemini-2.5-flash | Budget | Best cost-accuracy ratio |
