@@ -2944,10 +2944,21 @@ def tab_models_keys():
 
     # --- API keys per provider ---
     st.subheader("API Keys")
-    st.caption(
-        "Keys are stored encrypted-at-rest in the SQLite DB. Deleting a key "
-        "here does not revoke it on the provider's side."
-    )
+    import key_vault
+    if key_vault.is_encryption_active():
+        st.caption(
+            "\U0001f512 Keys are **encrypted at rest** (Fernet). You cannot "
+            "view a stored key after saving it \u2014 only replace or delete "
+            "it. Deleting a key here does not revoke it on the provider's side."
+        )
+    else:
+        st.warning(
+            "\u26a0\ufe0f `cryptography` is not available or no master key "
+            "could be resolved, so API keys are being stored **in plaintext** "
+            "in the SQLite database. Install `cryptography` and restart, or "
+            "set `OSCE_SECRET_KEY`, to enable encryption at rest."
+        )
+
     for provider, env_var in API_KEY_ENV_VARS.items():
         stored = db.get_api_key(provider)
         env_val = os.environ.get(env_var, "").strip()
@@ -2957,18 +2968,28 @@ def tab_models_keys():
             else "database" if stored
             else None
         )
-        masked = f"\u2022\u2022\u2022\u2022{stored[-4:]}" if stored and len(stored) >= 4 else ""
+        masked = key_vault.mask_tail(stored) if stored else ""
         cols = st.columns([2, 2, 3, 1])
         cols[0].markdown(f"**{PROVIDER_LABELS[provider]}**  \n`{env_var}`")
         cols[1].markdown(
-            (f"\u2705 Set ({source})  \n{masked}" if has_key else "\u26a0\ufe0f Not set")
+            f"\u2705 Set ({source})  \n`{masked}`"
+            if has_key else "\u26d4 Not set"
         )
         new_key = cols[2].text_input(
-            "Set / replace key", type="password", key=f"key_input_{provider}",
-            label_visibility="collapsed", placeholder="paste new key to save",
+            "Paste a new key to replace",
+            type="password", key=f"key_input_{provider}",
+            label_visibility="collapsed",
+            placeholder=(
+                "paste a new key to overwrite" if has_key
+                else "paste a new key to save"
+            ),
         )
         btn_col_save, btn_col_del = cols[3].columns(2)
-        if btn_col_save.button("Save", key=f"key_save_{provider}", disabled=not new_key.strip()):
+        save_label = "Replace" if has_key else "Save"
+        if btn_col_save.button(
+            save_label, key=f"key_save_{provider}",
+            disabled=not new_key.strip(),
+        ):
             _save_api_key_to_env(env_var, new_key.strip())
             st.success(f"Saved {env_var}")
             st.rerun()

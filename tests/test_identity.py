@@ -20,7 +20,10 @@ def fake_streamlit(monkeypatch):
     return fake_st
 
 
-def test_sign_in_creates_user_and_session(fake_streamlit):
+def test_sign_in_creates_user_and_session(fake_streamlit, monkeypatch):
+    # Server mode locks down the admin fallback so the role stays end_user
+    # unless the email is in OSCE_ADMIN_EMAILS.
+    monkeypatch.setenv("OSCE_SERVER_MODE", "1")
     import identity
     user = identity.sign_in("faculty@example.edu")
     assert user.email == "faculty@example.edu"
@@ -36,12 +39,24 @@ def test_sign_in_rejects_bad_email(fake_streamlit):
 
 
 def test_is_admin_matches_allowlist(fake_streamlit, monkeypatch):
-    import identity
+    monkeypatch.setenv("OSCE_SERVER_MODE", "1")
     monkeypatch.setenv("OSCE_ADMIN_EMAILS", "admin@example.edu,chris@osce.edu")
+    import identity
     user = identity.sign_in("admin@example.edu")
     assert identity.is_admin(user) is True
     user2 = identity.sign_in("faculty@example.edu")
     assert identity.is_admin(user2) is False
+
+
+def test_local_mode_auto_grants_admin(fake_streamlit, monkeypatch):
+    # Without OSCE_SERVER_MODE, anyone who signs in is treated as admin so
+    # local dev users can reach the admin tabs without extra config.
+    monkeypatch.delenv("OSCE_SERVER_MODE", raising=False)
+    monkeypatch.delenv("OSCE_ADMIN_EMAILS", raising=False)
+    import identity
+    user = identity.sign_in("local@example.edu")
+    assert user.role == "admin"
+    assert identity.is_admin(user) is True
 
 
 def test_sign_out_clears_session(fake_streamlit):

@@ -268,29 +268,49 @@ def init_db() -> None:
 # ---------------------------------------------------------------------------
 
 def save_api_key(provider: str, env_var: str, value: str) -> None:
-    """Store or update an API key."""
+    """Store or update an API key. Value is encrypted at rest when possible."""
+    import key_vault
+    stored = key_vault.encrypt(value)
     with get_connection() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO api_keys (provider, env_var, value, updated_at) "
             "VALUES (?, ?, ?, datetime('now'))",
-            (provider, env_var, value),
+            (provider, env_var, stored),
         )
 
 
 def load_api_keys() -> dict[str, tuple[str, str]]:
-    """Return {provider: (env_var, value)} for all stored keys."""
+    """Return ``{provider: (env_var, value)}`` for all stored keys.
+
+    Values that were written in an older plaintext format are returned as-is.
+    Encrypted values are decrypted transparently.
+    """
+    import key_vault
     with get_connection() as conn:
         rows = conn.execute("SELECT provider, env_var, value FROM api_keys").fetchall()
-    return {r["provider"]: (r["env_var"], r["value"]) for r in rows}
+    result: dict[str, tuple[str, str]] = {}
+    for r in rows:
+        try:
+            result[r["provider"]] = (r["env_var"], key_vault.decrypt(r["value"]))
+        except ValueError as exc:
+            logger.warning("Skipping undecryptable key for %s: %s", r["provider"], exc)
+    return result
 
 
 def get_api_key(provider: str) -> Optional[str]:
-    """Return the key value for a provider, or None."""
+    """Return the decrypted key value for a provider, or None."""
+    import key_vault
     with get_connection() as conn:
         row = conn.execute(
             "SELECT value FROM api_keys WHERE provider = ?", (provider,)
         ).fetchone()
-    return row["value"] if row else None
+    if row is None:
+        return None
+    try:
+        return key_vault.decrypt(row["value"])
+    except ValueError as exc:
+        logger.warning("Could not decrypt stored key for %s: %s", provider, exc)
+        return None
 
 
 def delete_api_key(provider: str) -> None:

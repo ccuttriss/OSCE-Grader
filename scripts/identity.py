@@ -38,12 +38,31 @@ def sign_in(email: str) -> User:
     email = email.strip().lower()
     if not _EMAIL_RE.match(email):
         raise ValueError("invalid email format")
-    role: Literal["end_user", "admin"] = "admin" if email in _admin_emails() else "end_user"
+    role: Literal["end_user", "admin"] = _resolve_role(email)
     user = User(email=email, role=role, session_id=str(uuid.uuid4()))
     _streamlit().session_state[_SESSION_KEY] = user
     from audit import log_event
     log_event("sign_in", stream="user", actor=user)
     return user
+
+
+def _resolve_role(email: str) -> Literal["end_user", "admin"]:
+    """Decide whether an email belongs to an admin.
+
+    Rules:
+      1. If the email is listed in OSCE_ADMIN_EMAILS, they're admin.
+      2. Otherwise, if the process is NOT running in server mode, grant
+         admin implicitly. This matches the local-workstation use case
+         where the operator is always the admin and shouldn't need to
+         pre-wire an env var just to reach the config tab.
+      3. In server mode, unlisted emails stay as end_user.
+    """
+    import server_env
+    if email in _admin_emails():
+        return "admin"
+    if not server_env.server_mode():
+        return "admin"
+    return "end_user"
 
 
 def sign_out() -> None:

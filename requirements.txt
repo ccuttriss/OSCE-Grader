@@ -7,3 +7,4 @@ python-docx>=0.8.11
 pdfminer.six>=20221105
 pytest>=7.0.0
 streamlit>=1.30
+cryptography>=42.0.0
