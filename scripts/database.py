@@ -22,7 +22,7 @@ def _default_db_path() -> str:
 
 DB_PATH = _default_db_path()
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 # ---------------------------------------------------------------------------
 # Connection management
@@ -175,6 +175,31 @@ CREATE TABLE IF NOT EXISTS material_tags (
     tag         TEXT    NOT NULL,
     PRIMARY KEY (material_id, tag)
 );
+
+CREATE TABLE IF NOT EXISTS model_config (
+    model_name         TEXT PRIMARY KEY,
+    provider           TEXT NOT NULL,
+    enabled            INTEGER NOT NULL DEFAULT 0,
+    accuracy           REAL,
+    cost_1k            REAL,
+    bias               REAL,
+    last_benchmarked   TEXT,
+    benchmark_run_id   INTEGER,
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS benchmark_runs (
+    run_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at       TEXT,
+    status             TEXT NOT NULL DEFAULT 'in_progress',
+    sample_source      TEXT NOT NULL,
+    sample_description TEXT,
+    models_json        TEXT NOT NULL DEFAULT '[]',
+    results_json       TEXT,
+    error_text         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_benchmark_runs_started ON benchmark_runs(started_at);
 """
 
 
@@ -266,6 +291,170 @@ def get_api_key(provider: str) -> Optional[str]:
             "SELECT value FROM api_keys WHERE provider = ?", (provider,)
         ).fetchone()
     return row["value"] if row else None
+
+
+def delete_api_key(provider: str) -> None:
+    """Remove the stored key for a provider. No-op if absent."""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM api_keys WHERE provider = ?", (provider,))
+
+
+# ---------------------------------------------------------------------------
+# Model configuration (enabled/disabled state + cached benchmark metrics)
+# ---------------------------------------------------------------------------
+
+def upsert_model_config(
+    model_name: str,
+    provider: str,
+    *,
+    enabled: Optional[bool] = None,
+    accuracy: Optional[float] = None,
+    cost_1k: Optional[float] = None,
+    bias: Optional[float] = None,
+    last_benchmarked: Optional[str] = None,
+    benchmark_run_id: Optional[int] = None,
+) -> None:
+    """Insert or update a row in model_config.
+
+    Only fields passed explicitly (non-None) are updated on an existing row.
+    On insert, unspecified fields use table defaults.
+    """
+    with get_connection() as conn:
+        existing = conn.execute(
+            "SELECT model_name FROM model_config WHERE model_name = ?",
+            (model_name,),
+        ).fetchone()
+
+        if existing is None:
+            conn.execute(
+                "INSERT INTO model_config "
+                "(model_name, provider, enabled, accuracy, cost_1k, bias, "
+                " last_benchmarked, benchmark_run_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    model_name,
+                    provider,
+                    1 if enabled else 0,
+                    accuracy,
+                    cost_1k,
+                    bias,
+                    last_benchmarked,
+                    benchmark_run_id,
+                ),
+            )
+            return
+
+        updates: list[str] = ["provider = ?", "updated_at = datetime('now')"]
+        values: list = [provider]
+        if enabled is not None:
+            updates.append("enabled = ?")
+            values.append(1 if enabled else 0)
+        if accuracy is not None:
+            updates.append("accuracy = ?")
+            values.append(accuracy)
+        if cost_1k is not None:
+            updates.append("cost_1k = ?")
+            values.append(cost_1k)
+        if bias is not None:
+            updates.append("bias = ?")
+            values.append(bias)
+        if last_benchmarked is not None:
+            updates.append("last_benchmarked = ?")
+            values.append(last_benchmarked)
+        if benchmark_run_id is not None:
+            updates.append("benchmark_run_id = ?")
+            values.append(benchmark_run_id)
+
+        values.append(model_name)
+        conn.execute(
+            f"UPDATE model_config SET {', '.join(updates)} WHERE model_name = ?",
+            values,
+        )
+
+
+def set_model_enabled(model_name: str, enabled: bool) -> None:
+    """Flip the enabled flag for an existing model_config row."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE model_config SET enabled = ?, updated_at = datetime('now') "
+            "WHERE model_name = ?",
+            (1 if enabled else 0, model_name),
+        )
+
+
+def list_model_configs() -> list[dict]:
+    """Return all model_config rows as a list of dicts."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM model_config ORDER BY provider, model_name"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_model_config(model_name: str) -> Optional[dict]:
+    """Return one model_config row as a dict, or None."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM model_config WHERE model_name = ?", (model_name,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Benchmark runs
+# ---------------------------------------------------------------------------
+
+def create_benchmark_run(
+    sample_source: str,
+    sample_description: str,
+    models: list[str],
+) -> int:
+    """Create a benchmark_runs row in 'in_progress' state. Return run_id."""
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO benchmark_runs "
+            "(sample_source, sample_description, models_json, status) "
+            "VALUES (?, ?, ?, 'in_progress')",
+            (sample_source, sample_description, json.dumps(models)),
+        )
+        return cur.lastrowid
+
+
+def complete_benchmark_run(
+    run_id: int,
+    results: list[dict],
+    *,
+    status: str = "complete",
+    error_text: Optional[str] = None,
+) -> None:
+    """Mark a benchmark run as finished and store its per-model results."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE benchmark_runs SET completed_at = datetime('now'), "
+            "status = ?, results_json = ?, error_text = ? WHERE run_id = ?",
+            (status, json.dumps(results), error_text, run_id),
+        )
+
+
+def list_benchmark_runs(limit: int = 20) -> list[dict]:
+    """Return recent benchmark runs, newest first."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT run_id, started_at, completed_at, status, sample_source, "
+            "sample_description, models_json "
+            "FROM benchmark_runs ORDER BY run_id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_benchmark_run(run_id: int) -> Optional[dict]:
+    """Return a full benchmark run row as a dict, or None."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM benchmark_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+    return dict(row) if row else None
 
 
 # ---------------------------------------------------------------------------

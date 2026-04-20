@@ -18,11 +18,25 @@ import sys
 import pandas as pd
 
 
-def evaluate(results_path: str, sections: list[str] | None = None, model: str | None = None) -> dict:
+def evaluate(
+    results_path: str,
+    sections: list[str] | None = None,
+    model: str | None = None,
+    *,
+    verbose: bool = True,
+    n_students: int | None = None,
+) -> dict:
     """Compute agreement metrics between GPT and human graders.
 
-    Returns a dict with per-section and overall metrics.
+    Returns a dict with per-section and overall metrics. When *verbose* is
+    False, no lines are printed (for programmatic use from the webapp).
+    *n_students* overrides the denominator used for per-1K cost estimates
+    when the results file was truncated or sampled.
     """
+    def _emit(msg: str) -> None:
+        if verbose:
+            print(msg)
+
     df = pd.read_excel(results_path)
 
     # Auto-detect sections from columns if not specified
@@ -36,20 +50,22 @@ def evaluate(results_path: str, sections: list[str] | None = None, model: str | 
                     sections.append(sec)
 
     if not sections:
-        print("ERROR: No sections found with both GPT and human grader scores.")
-        sys.exit(1)
+        if verbose:
+            print("ERROR: No sections found with both GPT and human grader scores.")
+            sys.exit(1)
+        return {"_error": "no_sections_found"}
 
     results = {}
     all_diffs_g1 = []
     all_diffs_g2 = []
     all_diffs_avg = []
 
-    print("=" * 80)
-    print(f"EVALUATION REPORT — {results_path}")
+    _emit("=" * 80)
+    _emit(f"EVALUATION REPORT — {results_path}")
     if model:
-        print(f"Model: {model}")
-    print(f"Students: {len(df)}  |  Sections: {', '.join(sections)}")
-    print("=" * 80)
+        _emit(f"Model: {model}")
+    _emit(f"Students: {len(df)}  |  Sections: {', '.join(sections)}")
+    _emit("=" * 80)
 
     for section in sections:
         gpt_col = f"{section}_gpt_score"
@@ -57,10 +73,10 @@ def evaluate(results_path: str, sections: list[str] | None = None, model: str | 
         g2_col = f"{section}_grader_2"
 
         if gpt_col not in df.columns:
-            print(f"  SKIP {section}: no GPT score column")
+            _emit(f"  SKIP {section}: no GPT score column")
             continue
         if g1_col not in df.columns:
-            print(f"  SKIP {section}: no human grader columns")
+            _emit(f"  SKIP {section}: no human grader columns")
             continue
 
         # Drop rows where GPT score is missing
@@ -101,19 +117,19 @@ def evaluate(results_path: str, sections: list[str] | None = None, model: str | 
         }
         results[section] = sec_results
 
-        print(f"\n--- {section.upper()} ---")
-        print(f"  Means:   GPT={gpt.mean():.2f}  G1={g1.mean():.2f}  G2={g2.mean():.2f}  HumanAvg={human_avg.mean():.2f}")
-        print(f"  Bias:    {sec_results['bias']:+.2f} (negative = GPT harsher)")
-        print(f"  MAE:     vs G1={diff_g1.mean():.2f}  vs G2={diff_g2.mean():.2f}  vs Avg={diff_avg.mean():.2f}")
-        print(f"  Exact:   vs G1={sec_results['exact_agree_g1']:.0f}%  vs G2={sec_results['exact_agree_g2']:.0f}%")
-        print(f"  Within1: vs G1={sec_results['within1_g1']:.0f}%  vs G2={sec_results['within1_g2']:.0f}%")
+        _emit(f"\n--- {section.upper()} ---")
+        _emit(f"  Means:   GPT={gpt.mean():.2f}  G1={g1.mean():.2f}  G2={g2.mean():.2f}  HumanAvg={human_avg.mean():.2f}")
+        _emit(f"  Bias:    {sec_results['bias']:+.2f} (negative = GPT harsher)")
+        _emit(f"  MAE:     vs G1={diff_g1.mean():.2f}  vs G2={diff_g2.mean():.2f}  vs Avg={diff_avg.mean():.2f}")
+        _emit(f"  Exact:   vs G1={sec_results['exact_agree_g1']:.0f}%  vs G2={sec_results['exact_agree_g2']:.0f}%")
+        _emit(f"  Within1: vs G1={sec_results['within1_g1']:.0f}%  vs G2={sec_results['within1_g2']:.0f}%")
 
         # Show per-student breakdown if any are off by 2+
         big_misses = diff_avg[diff_avg > 1]
         if len(big_misses) > 0:
-            print(f"  ⚠ {len(big_misses)} student(s) off by >1 from human avg:")
+            _emit(f"  ⚠ {len(big_misses)} student(s) off by >1 from human avg:")
             for idx in big_misses.index:
-                print(f"    Row {idx}: GPT={gpt[idx]:.0f}  G1={g1[idx]:.0f}  G2={g2[idx]:.0f}")
+                _emit(f"    Row {idx}: GPT={gpt[idx]:.0f}  G1={g1[idx]:.0f}  G2={g2[idx]:.0f}")
 
     # Overall summary
     if all_diffs_avg:
@@ -142,24 +158,24 @@ def evaluate(results_path: str, sections: list[str] | None = None, model: str | 
 
         signed_bias = sum(all_signed) / len(all_signed)
 
-        print("\n" + "=" * 80)
-        print("OVERALL SUMMARY")
-        print("=" * 80)
-        print(f"  Total score comparisons: {total}")
-        print(f"  Overall MAE vs human avg: {overall_mae:.2f}")
-        print(f"  Overall bias: {signed_bias:+.2f} (negative = GPT harsher)")
-        print(f"  Exact agreement:  vs G1={overall_exact_g1:.0f}%  vs G2={overall_exact_g2:.0f}%")
-        print(f"  Within-1 agreement: vs G1={overall_within1_g1:.0f}%  vs G2={overall_within1_g2:.0f}%")
-        print(f"  Within-1 vs human avg: {overall_within1:.0f}%")
-        print()
+        _emit("\n" + "=" * 80)
+        _emit("OVERALL SUMMARY")
+        _emit("=" * 80)
+        _emit(f"  Total score comparisons: {total}")
+        _emit(f"  Overall MAE vs human avg: {overall_mae:.2f}")
+        _emit(f"  Overall bias: {signed_bias:+.2f} (negative = GPT harsher)")
+        _emit(f"  Exact agreement:  vs G1={overall_exact_g1:.0f}%  vs G2={overall_exact_g2:.0f}%")
+        _emit(f"  Within-1 agreement: vs G1={overall_within1_g1:.0f}%  vs G2={overall_within1_g2:.0f}%")
+        _emit(f"  Within-1 vs human avg: {overall_within1:.0f}%")
+        _emit("")
 
         # Pass/fail verdict
         if overall_within1 >= 90:
-            print("  ✅ TARGET MET: ≥90% of scores within 1 point of human avg")
+            _emit("  \u2705 TARGET MET: \u226590% of scores within 1 point of human avg")
         elif overall_within1 >= 80:
-            print(f"  🟡 CLOSE: {overall_within1:.0f}% within 1 point (target: 90%)")
+            _emit(f"  \U0001f7e1 CLOSE: {overall_within1:.0f}% within 1 point (target: 90%)")
         else:
-            print(f"  ❌ NOT MET: {overall_within1:.0f}% within 1 point (target: 90%)")
+            _emit(f"  \u274c NOT MET: {overall_within1:.0f}% within 1 point (target: 90%)")
 
         results["_overall"] = {
             "total": total,
@@ -181,12 +197,13 @@ def evaluate(results_path: str, sections: list[str] | None = None, model: str | 
                     est_output = total * 250
                     est_cost = (est_input * input_cost + est_output * output_cost) / 1_000_000
                     per_student = est_cost / len(df) if len(df) > 0 else 0
-                    print(f"\n  Cost estimate ({model}):")
-                    print(f"    This run ({len(df)} students): ${est_cost:.4f}")
-                    print(f"    Per student: ${per_student:.4f}")
-                    print(f"    Per 1,000 students: ${per_student * 1000:.2f}")
+                    _emit(f"\n  Cost estimate ({model}):")
+                    _emit(f"    This run ({len(df)} students): ${est_cost:.4f}")
+                    _emit(f"    Per student: ${per_student:.4f}")
+                    _emit(f"    Per 1,000 students: ${per_student * 1000:.2f}")
                     results["_overall"]["est_cost"] = est_cost
                     results["_overall"]["est_cost_per_student"] = per_student
+                    results["_overall"]["est_cost_per_1k"] = per_student * 1000
             except ImportError:
                 pass  # config not available outside scripts/ context
 

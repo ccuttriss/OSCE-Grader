@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import logging
 import os
 import sys
@@ -197,6 +198,55 @@ def _save_api_key_to_env(env_var: str, value: str) -> None:
     provider = _ENV_VAR_TO_PROVIDER.get(env_var, env_var)
     db.save_api_key(provider, env_var, value)
     os.environ[env_var] = value
+
+
+def _delete_api_key_from_env(provider: str) -> None:
+    """Remove a provider's API key from the DB and the process environment."""
+    env_var = API_KEY_ENV_VARS.get(provider)
+    db.delete_api_key(provider)
+    if env_var and env_var in os.environ:
+        del os.environ[env_var]
+
+
+def _provider_has_key(provider: str) -> bool:
+    """True if the provider's API key is set in env or in the DB."""
+    env_var = API_KEY_ENV_VARS.get(provider)
+    if env_var and os.environ.get(env_var, "").strip():
+        return True
+    return db.get_api_key(provider) is not None
+
+
+def get_effective_model_info(model_name: str) -> dict:
+    """Return MODEL_INFO seed merged with any DB-persisted overrides.
+
+    Benchmark runs update ``model_config`` so displayed accuracy/cost/bias
+    reflect the most recent measurement instead of the hardcoded seed.
+    """
+    seed = dict(MODEL_INFO.get(model_name, {}))
+    cfg = db.get_model_config(model_name)
+    if cfg:
+        if cfg.get("accuracy") is not None:
+            seed["accuracy"] = cfg["accuracy"]
+        if cfg.get("cost_1k") is not None:
+            seed["cost_1k"] = cfg["cost_1k"]
+        if cfg.get("bias") is not None:
+            seed["bias"] = cfg["bias"]
+        seed["last_benchmarked"] = cfg.get("last_benchmarked")
+        seed["enabled"] = bool(cfg.get("enabled"))
+    else:
+        seed["enabled"] = False
+    seed["has_key"] = _provider_has_key(seed.get("provider", ""))
+    return seed
+
+
+def list_available_models() -> list[str]:
+    """Return model names that are both enabled AND have a valid API key."""
+    out: list[str] = []
+    for name in MODEL_INFO:
+        info = get_effective_model_info(name)
+        if info.get("enabled") and info.get("has_key"):
+            out.append(name)
+    return out
 
 
 # Initialize DB and load persisted keys on startup
@@ -600,28 +650,32 @@ def tab_grade_notes():
     # --- Model selection ---
     st.subheader("Model Selection")
 
-    # Group models by provider
-    providers_grouped: dict[str, list[str]] = {}
-    for model_name, info in MODEL_INFO.items():
-        prov = info["provider"]
-        providers_grouped.setdefault(prov, []).append(model_name)
+    model_options = list_available_models()
+    if not model_options:
+        st.warning(
+            "No models are both enabled and have an API key set. "
+            "An admin can configure them under **Models & Keys**."
+        )
+        return
 
-    # Radio selector for model
-    model_options = list(MODEL_INFO.keys())
-    # Default to gemini-2.5-flash (Recommended)
-    default_idx = model_options.index("gemini-2.5-flash") if "gemini-2.5-flash" in model_options else 0
+    default_idx = (
+        model_options.index("gemini-2.5-flash")
+        if "gemini-2.5-flash" in model_options else 0
+    )
 
     def _format_model_option(m: str) -> str:
-        info = MODEL_INFO[m]
+        info = get_effective_model_info(m)
         provider = PROVIDER_LABELS[info["provider"]]
+        acc = info.get("accuracy")
         accuracy_text = (
-            f"{info['accuracy']}% accuracy"
-            if info["accuracy"] is not None
+            f"{acc:.0f}% accuracy" if isinstance(acc, (int, float))
             else "not yet benchmarked"
         )
-        label = f"{m} ({provider}) — {accuracy_text}, ${info['cost_1k']:.2f}/1K students"
+        cost = info.get("cost_1k")
+        cost_text = f"${cost:.2f}/1K students" if isinstance(cost, (int, float)) else "cost TBD"
+        label = f"{m} ({provider}) \u2014 {accuracy_text}, {cost_text}"
         if info.get("badges"):
-            label += f" — {', '.join(info['badges'])}"
+            label += f" \u2014 {', '.join(info['badges'])}"
         return label
 
     selected_model = st.radio(
@@ -632,11 +686,14 @@ def tab_grade_notes():
         key="model_select",
     )
 
-    info = MODEL_INFO[selected_model]
+    info = get_effective_model_info(selected_model)
     mcol1, mcol2, mcol3, mcol4 = st.columns(4)
-    mcol1.metric("Accuracy", f"{info['accuracy']}%" if info['accuracy'] is not None else "N/A")
-    mcol2.metric("Cost / 1K students", f"${info['cost_1k']:.2f}")
-    mcol3.metric("Bias", f"{info['bias']:+.2f}" if info['bias'] is not None else "N/A")
+    acc = info.get("accuracy")
+    cost = info.get("cost_1k")
+    bias = info.get("bias")
+    mcol1.metric("Accuracy", f"{acc:.0f}%" if isinstance(acc, (int, float)) else "N/A")
+    mcol2.metric("Cost / 1K students", f"${cost:.2f}" if isinstance(cost, (int, float)) else "N/A")
+    mcol3.metric("Bias", f"{bias:+.2f}" if isinstance(bias, (int, float)) else "N/A")
     if info.get("badges"):
         mcol4.metric("Badge", ", ".join(info["badges"]))
 
@@ -1507,10 +1564,18 @@ def tab_convert():
         return
 
     # Model selection for conversion
+    convert_options = list_available_models()
+    if not convert_options:
+        st.warning(
+            "No models are both enabled and have an API key set. "
+            "Configure one under **Models & Keys** to enable rubric conversion."
+        )
+        return
+    default_convert = "gpt-4o" if "gpt-4o" in convert_options else convert_options[0]
     convert_model = st.selectbox(
         "Model for conversion",
-        list(MODEL_INFO.keys()),
-        index=list(MODEL_INFO.keys()).index("gpt-4o"),
+        convert_options,
+        index=convert_options.index(default_convert),
         key="convert_model",
     )
     convert_provider = MODEL_INFO[convert_model]["provider"]
@@ -1973,8 +2038,17 @@ def tab_gold_standard():
     st.subheader("LLM Bias Analysis")
 
     # Model selector (simplified)
-    gs_model_options = list(MODEL_INFO.keys())
-    gs_default_idx = gs_model_options.index("gemini-2.5-flash") if "gemini-2.5-flash" in gs_model_options else 0
+    gs_model_options = list_available_models()
+    if not gs_model_options:
+        st.warning(
+            "No models are both enabled and have an API key set. "
+            "Configure one under **Models & Keys** to run bias analysis."
+        )
+        return
+    gs_default_idx = (
+        gs_model_options.index("gemini-2.5-flash")
+        if "gemini-2.5-flash" in gs_model_options else 0
+    )
     gs_model = st.radio(
         "Choose a model for bias analysis",
         gs_model_options,
@@ -2321,23 +2395,21 @@ def tab_synthetic_generator():
 
     # --- Model selection ---
     st.subheader("LLM Configuration")
-    synth_model_options = {
-        "gemini-2.5-flash": ("Google", "google"),
-        "gemini-2.5-pro": ("Google", "google"),
-        "gpt-4o": ("OpenAI", "openai"),
-        "gpt-4o-mini": ("OpenAI", "openai"),
-        "gpt-5-mini": ("OpenAI", "openai"),
-        "claude-sonnet-4-6": ("Anthropic", "anthropic"),
-        "claude-haiku-4-5": ("Anthropic", "anthropic"),
-    }
+    synth_available = list_available_models()
+    if not synth_available:
+        st.warning(
+            "No models are both enabled and have an API key set. "
+            "Configure one under **Models & Keys** before generating synthetic data."
+        )
+        return
     synth_model = st.radio(
         "Model",
-        list(synth_model_options.keys()),
-        format_func=lambda k: f"{k} ({synth_model_options[k][0]})",
+        synth_available,
+        format_func=lambda k: f"{k} ({PROVIDER_LABELS[MODEL_INFO[k]['provider']]})",
         horizontal=True,
         key="synth_model",
     )
-    synth_provider = synth_model_options[synth_model][1]
+    synth_provider = MODEL_INFO[synth_model]["provider"]
 
     # API key
     synth_env_var = {
@@ -2852,6 +2924,399 @@ def tab_source_materials():
 
 
 # =========================================================================
+# Tab — Models & Keys (admin)
+# =========================================================================
+
+
+def tab_models_keys():
+    user = identity.get_current_user()
+    if not identity.is_admin(user):
+        import audit
+        audit.log_event(
+            "tab.access.denied", stream="user", actor=user,
+            severity="warn", outcome="denied",
+            target_kind="tab", target_id="models_keys",
+        )
+        st.error("This tab requires admin privileges.")
+        return
+
+    st.header("Models & API Keys")
+
+    # --- API keys per provider ---
+    st.subheader("API Keys")
+    st.caption(
+        "Keys are stored encrypted-at-rest in the SQLite DB. Deleting a key "
+        "here does not revoke it on the provider's side."
+    )
+    for provider, env_var in API_KEY_ENV_VARS.items():
+        stored = db.get_api_key(provider)
+        env_val = os.environ.get(env_var, "").strip()
+        has_key = bool(stored or env_val)
+        source = (
+            "environment" if env_val and not stored
+            else "database" if stored
+            else None
+        )
+        masked = f"\u2022\u2022\u2022\u2022{stored[-4:]}" if stored and len(stored) >= 4 else ""
+        cols = st.columns([2, 2, 3, 1])
+        cols[0].markdown(f"**{PROVIDER_LABELS[provider]}**  \n`{env_var}`")
+        cols[1].markdown(
+            (f"\u2705 Set ({source})  \n{masked}" if has_key else "\u26a0\ufe0f Not set")
+        )
+        new_key = cols[2].text_input(
+            "Set / replace key", type="password", key=f"key_input_{provider}",
+            label_visibility="collapsed", placeholder="paste new key to save",
+        )
+        btn_col_save, btn_col_del = cols[3].columns(2)
+        if btn_col_save.button("Save", key=f"key_save_{provider}", disabled=not new_key.strip()):
+            _save_api_key_to_env(env_var, new_key.strip())
+            st.success(f"Saved {env_var}")
+            st.rerun()
+        if btn_col_del.button("Del", key=f"key_del_{provider}", disabled=not has_key):
+            _delete_api_key_from_env(provider)
+            st.success(f"Deleted {env_var}")
+            st.rerun()
+
+    st.divider()
+
+    # --- Model enable/disable table ---
+    st.subheader("Models")
+    st.caption(
+        "Enabled models appear in the grading, synthetic-data, and rubric-"
+        "conversion selectors. A model must also have a valid API key for "
+        "its provider to be usable."
+    )
+
+    for model_name in MODEL_INFO:
+        info = get_effective_model_info(model_name)
+        cfg = db.get_model_config(model_name)
+        current_enabled = bool(cfg and cfg.get("enabled"))
+
+        provider_label = PROVIDER_LABELS[info["provider"]]
+        acc = info.get("accuracy")
+        cost = info.get("cost_1k")
+        bias = info.get("bias")
+        last_bench = info.get("last_benchmarked")
+
+        row = st.columns([2, 1, 1, 1, 1, 2, 1])
+        row[0].markdown(f"**{model_name}**  \n_{provider_label}_")
+        row[1].markdown("\u2705 Key" if info["has_key"] else "\u26d4 No key")
+        row[2].markdown(f"{acc:.0f}%" if isinstance(acc, (int, float)) else "\u2014")
+        row[3].markdown(f"${cost:.2f}" if isinstance(cost, (int, float)) else "\u2014")
+        row[4].markdown(
+            f"{bias:+.2f}" if isinstance(bias, (int, float)) else "\u2014"
+        )
+        row[5].markdown(
+            f"_last benchmarked:_\n{last_bench}" if last_bench else "_never benchmarked_"
+        )
+        new_val = row[6].toggle(
+            "Enabled", value=current_enabled,
+            key=f"model_enabled_{model_name}",
+            label_visibility="collapsed",
+        )
+        if new_val != current_enabled:
+            if cfg is None:
+                db.upsert_model_config(
+                    model_name, info["provider"], enabled=new_val,
+                )
+            else:
+                db.set_model_enabled(model_name, new_val)
+            st.rerun()
+
+    st.caption(
+        "Column order: model / key status / accuracy / $ per 1K students / "
+        "bias / last benchmarked / enabled toggle"
+    )
+
+
+# =========================================================================
+# Tab — Model Evaluation (admin)
+# =========================================================================
+
+
+def tab_evaluation():
+    user = identity.get_current_user()
+    if not identity.is_admin(user):
+        import audit
+        audit.log_event(
+            "tab.access.denied", stream="user", actor=user,
+            severity="warn", outcome="denied",
+            target_kind="tab", target_id="evaluation",
+        )
+        st.error("This tab requires admin privileges.")
+        return
+
+    st.header("Model Evaluation")
+    st.caption(
+        "Benchmark one or more enabled models against a human-graded sample. "
+        "Metrics update the displayed accuracy/cost/bias for each model."
+    )
+
+    # --- Sample source ---
+    st.subheader("Benchmark sample")
+    source_choice = st.radio(
+        "Data source",
+        ["Gold Standard (current assessment type)", "Built-in sample (examples.bak)"],
+        horizontal=True,
+        key="bench_source",
+    )
+
+    rubric_path = answer_key_path = notes_path = None
+    sample_source_label = ""
+    sample_description = ""
+
+    if source_choice.startswith("Gold"):
+        gs_type_id = st.selectbox(
+            "Assessment type",
+            [
+                "uk_osce",
+                "kpsom_ipass",
+                "kpsom_documentation",
+                "kpsom_ethics",
+            ],
+            key="bench_gs_type",
+        )
+        sample_source_label = f"gold_standard:{gs_type_id}"
+
+        rubric_path = _get_example_path(gs_type_id, "rubric")
+        notes_path = _get_example_path(gs_type_id, "student_notes")
+        # The faculty-scores slot holds the human-grader columns when uploaded
+        # through the Gold Standard tab; fall back to the notes file if it's
+        # absent (the built-in sample keeps both in one workbook).
+        fs_path = _get_example_path(gs_type_id, "faculty_scores")
+        answer_key_choice = st.file_uploader(
+            "Answer key (Excel)", type=["xlsx"], key="bench_gs_ak"
+        )
+        if answer_key_choice is not None:
+            answer_key_path = _save_upload(answer_key_choice)
+
+        if not rubric_path:
+            st.warning(
+                "No rubric uploaded for this assessment type in the Source "
+                "Materials / Gold Standard tab."
+            )
+        if not notes_path:
+            st.info(
+                "No student-notes example stored for this assessment type. "
+                "You can temporarily upload one below."
+            )
+            tmp_notes = st.file_uploader(
+                "Student notes with grader columns (Excel)",
+                type=["xlsx"], key="bench_gs_notes",
+            )
+            if tmp_notes is not None:
+                notes_path = _save_upload(tmp_notes)
+        sample_description = f"Gold standard {gs_type_id}"
+        if fs_path and not notes_path:
+            notes_path = fs_path
+    else:
+        base = st.text_input(
+            "Path to built-in sample folder",
+            value="examples.bak",
+            key="bench_examples_path",
+            help="Directory containing sample_standard_rubric.xlsx, "
+                 "sample_flankpain_key.xlsx, and sample_student_notes.xlsx.",
+        )
+        rubric_path = os.path.join(base, "sample_standard_rubric.xlsx")
+        answer_key_path = os.path.join(base, "sample_flankpain_key.xlsx")
+        notes_path = os.path.join(base, "sample_student_notes.xlsx")
+        sample_source_label = f"examples:{base}"
+        sample_description = f"Built-in sample ({base})"
+
+        missing = [p for p in (rubric_path, answer_key_path, notes_path)
+                   if not os.path.isfile(p)]
+        if missing:
+            st.error(
+                "Missing required sample file(s):\n" +
+                "\n".join(f"- {m}" for m in missing)
+            )
+
+    st.divider()
+
+    # --- Model selection ---
+    st.subheader("Models to benchmark")
+    available = [m for m in MODEL_INFO if get_effective_model_info(m).get("enabled")]
+    usable = [m for m in available if get_effective_model_info(m).get("has_key")]
+
+    if not available:
+        st.info(
+            "No models are enabled. Enable one or more models in the "
+            "**Models & Keys** tab first."
+        )
+        return
+    if not usable:
+        st.warning(
+            "Enabled models don't have an API key set. Add a key in "
+            "**Models & Keys**."
+        )
+        return
+
+    chosen: list[str] = []
+    cols = st.columns(min(len(usable), 3))
+    for i, m in enumerate(usable):
+        col = cols[i % len(cols)]
+        if col.checkbox(m, value=True, key=f"bench_pick_{m}"):
+            chosen.append(m)
+
+    st.divider()
+
+    # --- Parameters ---
+    with st.expander("Advanced parameters", expanded=False):
+        bench_temp = st.slider(
+            "Temperature", 0.0, 1.0, value=float(config.TEMPERATURE), step=0.1,
+            key="bench_temperature",
+        )
+        bench_workers = st.slider(
+            "Parallel sections per student", 1, 8, value=int(config.MAX_WORKERS),
+            key="bench_workers",
+        )
+
+    # --- Run ---
+    run_disabled = not chosen or not all(
+        p and os.path.isfile(p) for p in (rubric_path, answer_key_path, notes_path)
+    )
+    if st.button(
+        "\u25b6 Run benchmark",
+        type="primary",
+        disabled=run_disabled,
+        key="bench_run_btn",
+    ):
+        _execute_benchmark(
+            chosen,
+            rubric_path, answer_key_path, notes_path,
+            sample_source_label, sample_description,
+            bench_temp, bench_workers,
+        )
+
+    st.divider()
+
+    # --- History ---
+    st.subheader("Recent benchmark runs")
+    history = db.list_benchmark_runs(limit=10)
+    if not history:
+        st.caption("No benchmark runs yet.")
+        return
+
+    import pandas as pd
+    rows = []
+    for r in history:
+        try:
+            models = json.loads(r["models_json"] or "[]")
+        except Exception:
+            models = []
+        rows.append({
+            "run_id": r["run_id"],
+            "started": r["started_at"],
+            "status": r["status"],
+            "source": r["sample_source"],
+            "models": ", ".join(models),
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
+def _execute_benchmark(
+    chosen: list[str],
+    rubric_path: str,
+    answer_key_path: str,
+    notes_path: str,
+    sample_source_label: str,
+    sample_description: str,
+    bench_temp: float,
+    bench_workers: int,
+) -> None:
+    """Run the benchmark and persist results. Called from the Run button."""
+    from benchmark import run_benchmark
+
+    targets = [
+        {"model": m, "provider": MODEL_INFO[m]["provider"]}
+        for m in chosen
+    ]
+
+    run_id = db.create_benchmark_run(
+        sample_source=sample_source_label,
+        sample_description=sample_description,
+        models=chosen,
+    )
+
+    progress = st.progress(0.0, text="Starting benchmark\u2026")
+    status_area = st.empty()
+
+    def _cb(idx: int, total: int, current_model: str) -> None:
+        frac = idx / max(total, 1)
+        label = (
+            f"Benchmarking {idx + 1}/{total}: {current_model}"
+            if idx < total
+            else "Finalising\u2026"
+        )
+        progress.progress(frac, text=label)
+        status_area.caption(f"Completed {idx} of {total} models.")
+
+    try:
+        results = run_benchmark(
+            targets,
+            rubric_path, answer_key_path, notes_path,
+            temperature=bench_temp,
+            workers=bench_workers,
+            progress_callback=_cb,
+        )
+        db.complete_benchmark_run(run_id, results, status="complete")
+
+        # Push metrics back into model_config so the displayed accuracy/cost/
+        # bias numbers reflect the latest benchmark.
+        from datetime import datetime
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        for r in results:
+            if r.get("error"):
+                continue
+            db.upsert_model_config(
+                r["model"], r["provider"],
+                accuracy=r.get("within1_pct"),
+                cost_1k=r.get("est_cost_per_1k"),
+                bias=r.get("bias"),
+                last_benchmarked=now,
+                benchmark_run_id=run_id,
+            )
+        progress.progress(1.0, text="Done")
+    except Exception as exc:
+        db.complete_benchmark_run(run_id, [], status="failed", error_text=str(exc))
+        progress.empty()
+        st.error(f"Benchmark failed: {exc}")
+        return
+
+    # Results table
+    import pandas as pd
+    st.subheader("Results")
+    rows = []
+    for r in results:
+        rows.append({
+            "model": r["model"],
+            "within-1 %": _fmt_pct(r.get("within1_pct")),
+            "MAE": _fmt_num(r.get("mae")),
+            "bias": _fmt_signed(r.get("bias")),
+            "est $/1K": _fmt_money(r.get("est_cost_per_1k")),
+            "runtime (s)": r.get("elapsed_sec"),
+            "error": r.get("error") or "",
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
+def _fmt_pct(v) -> str:
+    return f"{v:.0f}%" if isinstance(v, (int, float)) else "\u2014"
+
+
+def _fmt_num(v) -> str:
+    return f"{v:.2f}" if isinstance(v, (int, float)) else "\u2014"
+
+
+def _fmt_signed(v) -> str:
+    return f"{v:+.2f}" if isinstance(v, (int, float)) else "\u2014"
+
+
+def _fmt_money(v) -> str:
+    return f"${v:.2f}" if isinstance(v, (int, float)) else "\u2014"
+
+
+# =========================================================================
 # Tab 8 — Audit Log
 # =========================================================================
 
@@ -2964,6 +3429,8 @@ ALL_TABS = [
     ("Convert Rubric",     tab_convert,              "admin"),
     ("Gold Standard",      tab_gold_standard,        "admin"),
     ("Synthetic Data",     tab_synthetic_generator,  "admin"),
+    ("Models & Keys",      tab_models_keys,          "admin"),
+    ("Model Evaluation",   tab_evaluation,           "admin"),
     ("Audit Log",          tab_audit_log,                                            "admin"),
 ]
 
